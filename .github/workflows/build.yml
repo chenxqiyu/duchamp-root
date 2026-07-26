@@ -78,4 +78,5 @@ jobs:
           artifacts: preload.so
           allowUpdates: true
           replacesArtifacts: true
+          makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
