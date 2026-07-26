@@ -222,12 +222,14 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int tid = atomic_load(&slide_waiter_tid);
     int calls = atomic_load(&slide_consume_calls);
     atomic_store(&slide_consume_calls, calls + 1);
+    errno = 0;
     long ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
+    int call_errno = errno;
     if (ret == 0) {
       atomic_fetch_add(&slide_consume_sched_ok, 1);
     }
-    pr_info("slide consumer sched tid=%d ret=%ld sched_ok=%d\n",
-            tid, ret, atomic_load(&slide_consume_sched_ok));
+    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
+            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok));
 
     atomic_store(&slide_consume_stop, 1);
     while (atomic_load(&slide_consume_go)) {

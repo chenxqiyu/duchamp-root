@@ -106,8 +106,12 @@ void *consumer_thread(void *arg __attribute__((unused))) {
         int consumer_nice = PSELECT_CONSUMER_NICE;
         errno = 0;
         long sched_ret = sched_setattr_tid(tid, consumer_nice);
+        int call_errno = errno;
         if (sched_ret == 0) {
           atomic_fetch_add(&consumer_success, 1);
+        } else {
+          pr_info("main consumer sched tid=%d ret=%ld errno=%d\n",
+                  tid, sched_ret, call_errno);
         }
         calls_this_seq++;
         if (calls_this_seq >= CONSUMER_MAX_CALLS) {
