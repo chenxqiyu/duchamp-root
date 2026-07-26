@@ -136,11 +136,7 @@ void do_pselect_fake_lock_route(void) {
     atomic_store(&main_route_delay_usec, delay_usec);
     atomic_store(&punch_consume_go, route_attempt);
 
-    struct timespec timeout = {
-      .tv_sec = PSELECT_TIMEOUT_SEC,
-      .tv_nsec = 0,
-    };
-    struct timespec *timeoutp = &timeout;
+    struct timespec *timeoutp = NULL;
 
     errno = 0;
     int ret = pselect(PSELECT_ROUTE_NFDS, &in, &out, &ex, timeoutp, NULL);
