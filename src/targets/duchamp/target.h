@@ -181,7 +181,7 @@
 #define FOPS_MMAP_OFF 0x60
 #define FOPS_OPEN_OFF 0x70
 #define FOPS_RELEASE_OFF 0x80
-#define FOPS_SPLICE_READ_OFF 0xc8
+#define FOPS_SPLICE_READ_OFF 0xc0
 #define FOPS_SHOW_FDINFO_OFF 0xe0
 
 #endif
