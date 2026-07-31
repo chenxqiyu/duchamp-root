@@ -166,7 +166,11 @@ void slide_pselect_stack_copy(void) {
   prepare_slide_pselect_fdsets_shifted(&in, &out, &ex);
   open_slide_selected_fds(&in, &out, &ex, high_read);
 
-  struct timespec *timeoutp = NULL;
+  struct timespec timeout = {
+    .tv_sec = PSELECT_TIMEOUT_SEC,
+    .tv_nsec = 0,
+  };
+  struct timespec *timeoutp = &timeout;
 
   atomic_store(&slide_consume_stop, 0);
   atomic_store(&slide_consume_go, 0);
