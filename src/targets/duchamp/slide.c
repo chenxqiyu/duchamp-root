@@ -321,6 +321,7 @@ void *slide_owner_thread(void *arg __attribute__((unused))) {
 
   atomic_store(&slide_owner_started, 1);
   pr_info("slide owner locking pi_chain (will block)\n");
+  usleep(10000);
   errno = 0;
   long ol = futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
   pr_info("slide owner FUTEX_LOCK_PI(pi_chain) ret=%ld errno=%d\n", ol, errno);
