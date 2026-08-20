@@ -341,6 +341,7 @@ long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
     const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
 long sched_setattr_tid(int tid, int nice_value);
+long sched_setattr_tid_rt(int tid, int rt_priority);
 int try_cache_ashmem_path(const char *path);
 int same_rdev_path(const char *path, dev_t rdev);
 void init_ashmem_path(void);

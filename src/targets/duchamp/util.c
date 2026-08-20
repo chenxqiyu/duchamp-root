@@ -175,6 +175,18 @@ long sched_setattr_tid(int tid, int nice_value) {
   return syscall(SYS_sched_setattr, tid, &attr, 0);
 }
 
+/* RT-variant: set SCHED_FIFO with given priority (1..99).
+ * Used by slide consumer experiment to test whether a real RT priority
+ * change is what triggers rt_mutex_adjust_prio_chain on shennong 6.1. */
+long sched_setattr_tid_rt(int tid, int rt_priority) {
+  struct local_sched_attr attr;
+  memset(&attr, 0, sizeof(attr));
+  attr.size = sizeof(attr);
+  attr.sched_policy = SCHED_FIFO;
+  attr.sched_priority = rt_priority;
+  return syscall(SYS_sched_setattr, tid, &attr, 0);
+}
+
 int try_cache_ashmem_path(const char *path) {
   int fd = open(path, O_RDWR | O_CLOEXEC);
   if (fd < 0) {

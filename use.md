@@ -41,9 +41,18 @@ adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
 
 ## 5. SLIDE_LOGGERS_0_1_OFF 槽位修正（2026-08-21）
 
-- **症状**：slide 走 pselect 路由不 panic，但 `bad leaked pointer=7143b9bf1b12b3d4`（顶 16 位 0x7143，非 0xffff 内核指针），KASLR 泄露失败
-- **根因**：`SLIDE_LOGGERS_0_1_OFF` 原值 `0x01fe2918` = `loggers[0][0]`（**NF_LOG_TYPE_LOG** 槽）。Android 只把 nfulnl_logger 注册到 `loggers[*][NF_LOG_TYPE_ULOG=1]` 槽，LOG 槽运行时为 NULL。内核读到 0 → `proc_do_uuid` 发现 sysctl_bootid 为空 → 生成随机 UUID → 用户读到垃圾值
-- **修正**：`0x01fe2918` → `0x01fe2920`（= loggers 起始 + ULOG*8 = `loggers[0][1]` 槽，运行时存 nfulnl_logger 带KASLR指针）
-- **依据**：IDA 验证 nfulnl_logger@0x01fe29c8（name 指针+type=1=ULOG），loggers[11][2]数组=176字节，0x01fe29c8-176=0x01fe2918=loggers 起始；NF_LOG_TYPE_ULOG=1（源码 include/net/netfilter/nf_log.h）；slot 定义 = loggers + ULOG*8
-- BUILD_VARIANT_LABEL / BUILD_FINGERPRINT 顺带更正为 shennong_OS3.0.307.0.WNBCNXM（原为 duchamp_303，仅日志标识，不影响逻辑）
+- **症状**：slide 走 pselect 路由不 panic，但 `bad leaked pointer=7143b9bf1b12b3d4`（非 0xffff 内核指针），KASLR 泄露失败
+- **LOGGERS 槽位修正**：`0x01fe2918` → `0x01fe2920`（loggers[0][1]=ULOG 槽，原值是 LOG 槽运行时为NULL）。语义正确已保留，但**实测证明不是泄露失败根因**
+- BUILD_VARIANT_LABEL / BUILD_FINGERPRINT 顺带更正为 shennong_OS3.0.307.0.WNBCNXM
+
+## 6. 真实根因定位（2026-08-21，实测后更正）
+
+- **关键证据**：`7143b9bf1b12b3d4` = boot_id 原始 UUID `d4b3121b-bfb9-4371-...` 前8字节的解析值。即 slide 读到的是**未被打写的原始 boot_id**
+- **所有 shift 同值**：attempt1(shift=3)、attempt11(shift=-1)、attempt12(shift=-2) 全读到同一 `7143b9bf1b12b3d4`。若 shift 错导致覆盖位置偏会读不同垃圾值；全读原始值说明**PI 链对 fake waiter pi_tree_entry.rb_left 目标的写入从未触发**，与 shift 无关
+- **排除 PSELECT_WAITER_WORD_SHIFT**：shift=3 非 root cause（虽仍是待核实项，但不是当前失败原因）
+- **待排查方向**：
+  1. waiter 在 pselect 时是否仍挂在 pi_target 树（FUTEX_WAIT_REQUEUE_PI 返回 EAGAIN 后 cleanup 可能已移除 waiter，导致后续 PI 重算不涉及它）
+  2. consumer 的 `sched_setattr(SCHED_BATCH+nice)` 对非 RT 任务不触发 rt_mutex PI 传播，可能不是触发写入的机制
+  3. duchamp slide.c 相对参考版（CVE-2026-43499-Poc-Analysis/source/src/slide.c）的改动：固定 nice=19 vs 动态(calls%19)+1、legacy 11-word vs 6.4+ 13-word、consumer 去掉 tgkill 存活检查
+- **设备限制**：无 root，/proc/kallsyms 与 /sys/kernel/btf/vmlinux 不可读，无法用 generate_target.py 算法；/proc/config.gz 可读
 - 其他 SLIDE_* 偏移经 IDA 核对正确：NFULNL_LOGGER@0x01fe29c8、RANDOM_BOOT_ID_DATA@0x02107448（指向 sysctl_bootid 的 .data 槽，entry mode=0o444）、SYSCTL_BOOTID@0x0224a458

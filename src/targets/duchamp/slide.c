@@ -232,13 +232,22 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int calls = atomic_load(&slide_consume_calls);
     atomic_store(&slide_consume_calls, calls + 1);
     errno = 0;
-    long ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
+    /* EXPERIMENT: use SCHED_FIFO+RT priority instead of SCHED_BATCH+nice to
+     * test whether an RT priority change is what triggers
+     * rt_mutex_adjust_prio_chain on shennong 6.1. Falls back to nice on EPERM. */
+    long ret = sched_setattr_tid_rt(tid, 50);
     int call_errno = errno;
+    if (ret != 0 && call_errno == 1) { /* EPERM */
+      errno = 0;
+      ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
+      call_errno = errno;
+    }
     if (ret == 0) {
       atomic_fetch_add(&slide_consume_sched_ok, 1);
     }
-    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
-            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok));
+    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d (rt50 fallback nice=%d)\n",
+            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok),
+            PSELECT_CONSUMER_NICE);
 
     atomic_store(&slide_consume_stop, 1);
     while (atomic_load(&slide_consume_go)) {
