@@ -56,3 +56,75 @@ adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
   3. duchamp slide.c 相对参考版（CVE-2026-43499-Poc-Analysis/source/src/slide.c）的改动：固定 nice=19 vs 动态(calls%19)+1、legacy 11-word vs 6.4+ 13-word、consumer 去掉 tgkill 存活检查
 - **设备限制**：无 root，/proc/kallsyms 与 /sys/kernel/btf/vmlinux 不可读，无法用 generate_target.py 算法；/proc/config.gz 可读
 - 其他 SLIDE_* 偏移经 IDA 核对正确：NFULNL_LOGGER@0x01fe29c8、RANDOM_BOOT_ID_DATA@0x02107448（指向 sysctl_bootid 的 .data 槽，entry mode=0o444）、SYSCTL_BOOTID@0x0224a458
+
+## 7. 整个提权流程与当前进度（2026-08-21）
+
+### 完整流程链（源码 `run_exploit` main.c:178 + `do_pselect_fake_lock_route` fops.c:88 + fops.c:284）
+
+```
+[第1步] KASLR 泄露
+  ├─ 优先 perf_event_open 泄露 text_base（main.c:197 perf_leak_text_base）
+  └─ 失败则 slide 子路径（main.c:205 slide_leak_kernel_base）
+       └─ slide 走 pselect 路由，靠 PI 链写 boot_id 区读 nfulnl_logger 指针
+
+[第2步] 准备 FOPS payload kernel page（main.c:211 prepare_good_kernel_page(PAGE_PAYLOAD_FOPS)）
+
+[第3步] main route 线程组（main.c:213 run_main_route_threads）
+  ├─ waiter 线程：lock pi_chain → FUTEX_WAIT_REQUEUE_PI 等 pi_target → do_pselect_fake_lock_route
+  ├─ owner 线程：lock pi_target → lock pi_chain（阻塞，制造 PI 链）
+  └─ consumer 线程：sched_setattr 触发 PI 重算
+  └─ 主线程发 FUTEX_CMP_REQUEUE_PI 把 waiter requeue 到 pi_target
+
+[第4步] do_pselect_fake_lock_route（fops.c:88）
+  └─ pselect 栈覆盖 fake_lock → 触发内核用 fake fops 表 → 拿到可控 fd
+
+[第5步] install_pipe_physrw(fd)（fops.c:284）
+  └─ 通过 fake fops 建立 pipe 物理读写原语（physrw_read_ok/write_ok/read64_ok/write64_ok）
+
+[第6步] install_android_root(fd)（fops.c:284 → root.c:289）
+  ├─ find_task_by_tgid 定位当前 task
+  ├─ patch_cred_identity 改 uid/gid/caps
+  ├─ patch_cred_sid 改 SELinux sid
+  ├─ patch_cred_object / patch_task_seccomp 关 seccomp
+  └─ cfi_stage_done=1（fops.c:416）
+
+[第7步] spawn_root_child 验证（root.c:39）
+  ├─ fork 子进程 setgid(0)/setuid(0)/setenforce(0)
+  └─ root_child_done=1
+
+[第8步] install_embedded_ksud（preload.c:96）
+  └─ 写 /data/local/tmp/ksud 并启动 daemon（提权后持久化）
+```
+
+### 当前进度：卡在第 1 步 KASLR 泄露
+
+| 步骤 | 状态 | 说明 |
+|------|------|------|
+| 1. KASLR 泄露 | ❌ **卡住** | perf 路径 EACCES(errno=13，shell 无 perf 权限)；slide 路径读到原始 boot_id，PI 链写入未触发 |
+| 2. FOPS payload page | ⬜ 未到 | 依赖第1步 |
+| 3. main route 线程 | ⬜ 未到 | 依赖第1步 |
+| 4. pselect fake_lock route | ⬜ 未到 | 依赖第1步 |
+| 5. pipe 物理读写 | ⬜ 未到 | 依赖第1步 |
+| 6. install_android_root | ⬜ 未到 | 依赖第1步 |
+| 7. root child 验证 | ⬜ 未到 | 依赖第1步 |
+| 8. ksud daemon | ⬜ 未到 | 依赖第1步 |
+
+### 第 1 步卡住的两个子路径
+
+**perf 子路径**：`perf_event_open` 返回 EACCES(13)——shell 上下文 `u:r:shell:s0` 无 `perf_event_open` 权限，此路径在 shennong 上不可用。
+
+**slide 子路径**（当前重点）：日志 `bad leaked pointer=7143b9bf1b12b3d4` = 原始 boot_id UUID 前 8 字节。IDA 逆向确认根因：waiter 走 `futex_wait_requeue_pi` 的 `Q_REQUEUE_PI_IGNORE`(v17==1) 分支返回 EAGAIN，**只 plist_del 删 futex 等待队列，未调 `rt_mutex_wait_proxy_lock`**，waiter 从未进入 pi_target 的 rt_mutex waiters 树，所以 PI 链无活节点可操作，boot_id 区从未被写入。slide 机制前提（waiter 停在树上被 PI 链操作 pi_tree_entry.rb_left）在 shennong 6.1 + 当前触发时序下不成立。
+
+### 已排除的修复尝试（均经实测）
+- SLIDE_LOGGERS_0_1_OFF 槽位（LOG→ULOG）：语义正确，非根因
+- PSELECT_WAITER_WORD_SHIFT（所有 shift 同值证明无关）
+- consumer SCHED_FIFO+50（RT 优先级成功生效仍无效，证明断点不在 consumer 触发）
+
+### 下一步方向
+slide 的 pselect 路由在 6.1 上需重新设计触发路径让 waiter 进入 v17==4（rt_mutex_wait_proxy_lock）分支，而非当前 v17==1（IGNORE/EAGAIN）。这不是改偏移/参数能解决，属机制层重新设计。或换其他 KASLR 泄露原语。
+
+### 实验性代码改动（已编译验证，证实均非根因，保留供参考）
+- `src/util.c` + `src/targets/duchamp/util.c`：加 `sched_setattr_tid_rt`（SCHED_FIFO+priority）
+- `src/common.h`：声明 `sched_setattr_tid_rt`
+- `src/targets/duchamp/slide.c`：consumer 改用 rt50（EPERM 时 fallback nice=19）
+- `src/targets/duchamp/target.h`：`SLIDE_LOGGERS_0_1_OFF` 0x01fe2918→0x01fe2920（ULOG 槽），BUILD 标签→shennong 307
