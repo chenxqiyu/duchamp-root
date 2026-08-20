@@ -49,7 +49,7 @@
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
-#define MM_STRUCT_SZ 0x400
+#define MM_STRUCT_SZ 0x400 /* mm_struct slab objsize on shennong 6.1.138 (/proc/slabinfo: objsize=1024 objperslab=32 pagesperslab=8=order3); NOT sizeof(struct)=0x3c0 */
 #define MM_ORDER 3
 #define MM_PARTIALS 5
 #define CORE 0
@@ -58,6 +58,7 @@
 #define ORDER3_SIZE (PAGE_SIZE << MM_ORDER)
 #define PIPE_CANDIDATE_PAGES 8
 #define SKB_SEND_SIZE (ORDER3_SIZE * 2)
+#define SKB_RECLAIM_SIZE (ORDER3_SIZE - SKB_DATA_DELTA)
 #define SKB_RECLAIM_SENDS 4
 #define FOPS_TABLE_OFF FOPS_OFF
 #define SKB_FRAG_BIAS 0
