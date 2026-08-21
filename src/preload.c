@@ -114,6 +114,9 @@ __attribute__((constructor)) static void load(void) {
   }
   started = 1;
 
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+
   unsetenv("LD_PRELOAD");
 
   char *argv[2] = {

