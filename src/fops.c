@@ -1,18 +1,32 @@
 /* ==========================================================================
  * 【第 2 关】偷换玩具柜的钥匙牌 —— FOPS 劫持
  * ==========================================================================
- * 幼儿园每个玩具柜挂一块"谁能开柜子"的钥匙牌(文件操作 ops 表)。
- * 我们的目标柜子 = ashmem 设备(匿名共享内存，谁都能碰)。
+ * 目标柜子 = ashmem 设备：misc 框架的 ashmem_misc.fops 槽(.data)存着
+ * "谁能开柜子"的钥匙牌地址。把它换成书包(回收页)里的假钥匙牌 fake_fops，
+ * 以后 open("/dev/ashmem") 拿到的 file->f_op 就是假牌 -> 假 read_iter
+ * (configfs_read_iter: offset=内核地址读原语) / write_iter(写原语)。
  *
- * 偷换手法(鬼标签版任意写)：
- *   1. 假排班表里把"鬼标签的 PI 树父指针"指向钥匙牌上要涂改的那一格
- *   2. 园长整理鬼标签时,顺手把 PI 树父指针(书包地址)写到那一格
- *      —— 相当于把钥匙牌上的名字涂改成"书包里的假钥匙牌"
- *   3. 以后对 ashmem 调用 llseek/ioctl/read/write，园长按图索骥
- *      拿到的是书包里的假钥匙牌 -> 假函数指针 -> 想干嘛就干嘛
+ * W1 任意写原语(6.1.138 源码逐行验证，见 boot.md):
+ *   consumer sched_setattr(nice) -> rt_mutex_setprio -> rt_mutex_adjust_pi
+ *     (早退检查 prio: 鬼标签 prio=130 != CFS 120 -> 全链)
+ *   -> rt_mutex_adjust_prio_chain(task, MIN_CHAINWALK, NULL, next_lock, ...)
+ *     [3] next_lock == waiter->lock(fake_lock) 校验通过
+ *     [4] lock = waiter->lock = fake_lock(页内)
+ *     [5] trylock(fake_lock->wait_lock=0) 成功
+ *     [7] rt_mutex_dequeue(fake_lock, 鬼waiter) -> rb_erase_cached(tree_entry)
+ *         tree_right=0 且 tree_left=写目标 -> rbtree.c "Still case 1, the
+ *         child is node->rb_left": tmp->__rb_parent_color = pc
+ *         ==> *(u64*)tree_left = tree_pc   【W1】
+ *         该分支 rebalance 恒 NULL(无 __rb_erase_color 重平衡)
+ *     [8] waiter_update_prio(栈上写) + rt_mutex_enqueue(空树挂根,页内写)
+ *     [9] rt_mutex_owner(fake_lock)=NULL -> walk 干净退出
+ *         (wake_up_state(fake_task, 3): fake_task.__state=0 -> ttwu 早退)
  *
- * 本关核心是把"鬼标签写"升级成稳定的"任意地址写 8 字节"(cfi 系列)，
- * 再顺手修复/还原钥匙牌，别让园长发现。
+ * fd_set 布局 = slide.c 真机验证的 11-word 骨架(shift=3)，仅把
+ * tree_pc/tree_left 两格换成 fops 语义：tree_pc=fake_fops(写入值)，
+ * tree_left=misc_fops 槽运行时地址(写目标，需 KASLR)。其余格子与
+ * slide 完全一致(页内 RED 父指针/空子节点/fake_task/fake_lock/prio=130)，
+ * 保证 walk 只碰：栈上鬼标签 + 喷射页 + misc_fops 槽(.data 必可写)。
  * ========================================================================== */
 
 #include "common.h"
