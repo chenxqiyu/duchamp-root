@@ -132,3 +132,16 @@ slide 的 pselect 路由在 6.1 上需重新设计触发路径让 waiter 进入 
 
 
 cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"; $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"; & $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/duchamp/target.h"' src/main.c src/util.c src/targets/duchamp/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/duchamp/bin/preload.so -pthread 2>&1 | Select-Object -First 40; if (Test-Path build/duchamp/bin/preload.so) { Get-FileHash build/duchamp/bin/preload.so -Algorithm SHA256 | Format-List; Get-Item build/duchamp/bin/preload.so | Select-Object Length, LastWriteTime }
+
+
+https://github.com/1ndevelopment/CVE-2026-43499-S26
+
+第 1 关打通了！ 交叉验证完美：
+
+worker_thread caller = 0xffffffd06fcda4ac，锚点 0xffffffc0080da4ac
+
+rcu caller = 0xffffffd06fd67b44，锚点 0xffffffc008167b44
+
+两者推出同一个 slide = 0x1067C00000（68GB 级、精确 2MB 对齐）✓
+
+这台设备的 KASLR slide 巨大——这也彻底解释了为什么 pselect/boot_id 路线总是失败：W1 写目标的"slide 修正"完全落在不可预测的页上。tracefs 路线零漏洞、零 panic 风险。现在把它写进 slide.c 作为主路线。

