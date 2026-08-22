@@ -202,18 +202,7 @@ uint32_t __futex_hash(futex_key_t *key, uint32_t futex_hashsize)
 unsigned long futex_hashsize = (unsigned long)-1;
 void futex_init(void)
 {
-    /* kernel: roundup_pow_of_two(256 * num_possible_cpus()); == online cpus when hotplug is off */
-    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    futex_hashsize = (unsigned long)cpus * 256;
-    const char *env = getenv("KSNITCH_HASHSIZE");
-    if (env) {
-        unsigned long v = strtoul(env, NULL, 0);
-        if (v) {
-            futex_hashsize = v;
-            pr_info("futex hashsize override=%lu\n", v);
-        }
-    }
-    pr_info("futex hashsize=%lu (online cpus=%ld)\n", futex_hashsize, cpus);
+    futex_hashsize = SYSCHK(sysconf(_SC_NPROCESSORS_ONLN) * 256);
 }
 uint32_t futex_hash(size_t addr, size_t mm)
 {
@@ -223,14 +212,4 @@ uint32_t futex_hash(size_t addr, size_t mm)
     key.private.address = addr & ~KS_PAGE_MASK;
     key.private.offset = addr & KS_PAGE_MASK;
     return __futex_hash(&key, futex_hashsize);
-}
-/* unmasked 32-bit hash: lets the caller compare against several candidate
- * futex_hashsize values without re-running jhash2 */
-uint32_t futex_hash_full(size_t addr, size_t mm)
-{
-    futex_key_t key;
-    key.private.mm = (void *)mm;
-    key.private.address = addr & ~KS_PAGE_MASK;
-    key.private.offset = addr & KS_PAGE_MASK;
-    return futex_hash_no_trunc(&key);
 }

