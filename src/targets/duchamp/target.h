@@ -14,12 +14,9 @@
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL
 #define P0_PHYS_OFFSET 0x80000000ULL
 #define P0_KERNEL_PHYS_LOAD 0xa8000000ULL
-/* KernelSnitch 枚举窗口只需覆盖 DRAM 的 linear 别名,
- * 排除 phys hole(0 ~ 0x80000000)与 DRAM 末端之后的区域,降低误报 */
-#define KERNELSNITCH_IDENTITY_START 0xffffff8080000000ULL
-#define KERNELSNITCH_IDENTITY_END 0xffffff8480000000ULL
-#define DIRECT_MAP_BASE 0xffffff8000000000ULL
-#define DIRECT_MAP_END 0xffffffc000000000ULL
+#define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL
+#define DIRECT_MAP_BASE 0xffffff8080000000ULL
+#define DIRECT_MAP_END 0xffffff9000000000ULL
 #define VMEMMAP_START 0xfffffffe00000000ULL
 
 /* 与 targets/duchamp/util.c 的 p0_data_alias 严格一致的编译期版本:
