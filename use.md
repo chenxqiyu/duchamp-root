@@ -151,3 +151,5 @@ rcu caller = 0xffffffd06fd67b44，锚点 0xffffffc008167b44
 
 结论:39-bit VA 布局实锤,linear map PAGE_OFFSET = 0xffffff8000000000(16GB 窗口)。而 target.h 的 P0_PAGE_OFFSET = 0xffffff8080000000 是 48-bit 语义的值,错了 512GB。现在验证 fake page 地址来源和 EDEADLK 历史,确认完整因果链。
 
+git stash
+git checkout ed1af3a -- .
