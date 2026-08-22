@@ -128,6 +128,46 @@ int install_embedded_ksud(void) {
   return 1;
 }
 
+/* 【日志文件分流】LOG_FILE 环境变量指定路径时，fork 一个 tee 进程把
+ * stdout/stderr 同时写进文件。exploit 崩溃/重启后也能从文件里查现场。 */
+static void setup_log_file(void) {
+  char *log_path = getenv("LOG_FILE");
+  if (!log_path || !*log_path) {
+    return;
+  }
+  int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (log_fd < 0) {
+    return;
+  }
+  /* 用 pipe + tee 子进程：printf 照常输出，同时镜像到文件 */
+  int pipefd[2];
+  if (pipe2(pipefd, O_CLOEXEC) != 0) {
+    close(log_fd);
+    return;
+  }
+  pid_t pid = fork();
+  if (pid == 0) {
+    /* child: tee 进程，读 pipe 写 log_fd + 原始 stdout */
+    int orig_out = dup(STDOUT_FILENO);
+    close(pipefd[1]);
+    char buf[4096];
+    for (;;) {
+      ssize_t n = read(pipefd[0], buf, sizeof(buf));
+      if (n <= 0) break;
+      if (orig_out >= 0) write(orig_out, buf, n);
+      write(log_fd, buf, n);
+    }
+    _exit(0);
+  }
+  if (pid > 0) {
+    close(pipefd[0]);
+    close(log_fd);
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+  }
+}
+
 /* 【魔法道具启动】小朋友一背起书包(LD_PRELOAD 加载 .so)就自动开演：
  * 摘掉 LD_PRELOAD 环境变量(别让后续 exec 的程序再触发一次)，
  * 然后直接 run_exploit() 闯五关。 */
@@ -140,6 +180,9 @@ __attribute__((constructor)) static void load(void) {
 
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+
+  /* LOG_FILE 先于任何 pr_* 输出设置，保证第一行也能落盘 */
+  setup_log_file();
 
   unsetenv("LD_PRELOAD");
 
