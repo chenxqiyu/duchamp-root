@@ -118,8 +118,12 @@
 #define PIPE_MAX_ATTEMPTS 12
 
 #define P0_KERNEL_PHYS_DELTA (P0_KERNEL_PHYS_LOAD - P0_PHYS_OFFSET)
+/* 默认 OR 版假设 linear 别名锚定 P0_PHYS_OFFSET(仅当 PHYS_LOAD == PHYS_OFFSET
+ * 的机型成立);shennong 等内核加载于非 DRAM 起点的机型在 target.h 里 override */
+#ifndef P0_DATA_ALIAS_CONST
 #define P0_DATA_ALIAS_CONST(image_addr) \
   (P0_PAGE_OFFSET | ((image_addr) - KIMAGE_TEXT_BASE + P0_KERNEL_PHYS_DELTA))
+#endif
 
 #define CONSUMER_CORE (CORE + 1)
 #define CONSUMER_MAX_CALLS 1
