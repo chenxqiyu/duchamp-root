@@ -381,8 +381,7 @@ uintptr_t prepare_good_kernel_page(int payload_mode);
 
 void fdset_put_word(fd_set *set, int word, uint64_t value);
 uint64_t fdset_get_word(const fd_set *set, int word);
-void open_selected_fds(
-    fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd);
+void open_selected_fds(fd_set *in, fd_set *out, fd_set *ex);
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void do_pselect_fake_lock_route(void);
 
