@@ -224,3 +224,13 @@ uint32_t futex_hash(size_t addr, size_t mm)
     key.private.offset = addr & KS_PAGE_MASK;
     return __futex_hash(&key, futex_hashsize);
 }
+/* unmasked 32-bit hash: lets the caller compare against several candidate
+ * futex_hashsize values without re-running jhash2 */
+uint32_t futex_hash_full(size_t addr, size_t mm)
+{
+    futex_key_t key;
+    key.private.mm = (void *)mm;
+    key.private.address = addr & ~KS_PAGE_MASK;
+    key.private.offset = addr & KS_PAGE_MASK;
+    return futex_hash_no_trunc(&key);
+}

