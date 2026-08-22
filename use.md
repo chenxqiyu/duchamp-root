@@ -145,3 +145,9 @@ rcu caller = 0xffffffd06fd67b44，锚点 0xffffffc008167b44
 两者推出同一个 slide = 0x1067C00000（68GB 级、精确 2MB 对齐）✓
 
 这台设备的 KASLR slide 巨大——这也彻底解释了为什么 pselect/boot_id 路线总是失败：W1 写目标的"slide 修正"完全落在不可预测的页上。tracefs 路线零漏洞、零 panic 风险。现在把它写进 slide.c 作为主路线。
+
+
+
+
+结论:39-bit VA 布局实锤,linear map PAGE_OFFSET = 0xffffff8000000000(16GB 窗口)。而 target.h 的 P0_PAGE_OFFSET = 0xffffff8080000000 是 48-bit 语义的值,错了 512GB。现在验证 fake page 地址来源和 EDEADLK 历史,确认完整因果链。
+
