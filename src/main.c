@@ -130,15 +130,46 @@ void *consumer_thread(void *arg __attribute__((unused))) {
           break;
         }
         atomic_fetch_add(&consumer_calls, 1);
-        int consumer_nice = PSELECT_CONSUMER_NICE;
+        int call_num = atomic_load(&consumer_calls);
+
+        /* Step 1: RT-ENTER (expected to fail with EPERM — this
+         * "primes" the PI chain before the nice-based sched_setattr
+         * actually triggers rt_mutex_setprio -> adjust_prio_chain).
+         * Mirrors slide_consumer_thread two-stage pattern. */
+        pr_info("main consumer call#%d tid=%d stage=RT-ENTER "
+                "sched_setattr SCHED_FIFO prio=50\n",
+                call_num, tid);
+        fflush(stdout);
         errno = 0;
-        long sched_ret = sched_setattr_tid(tid, consumer_nice);
+        long sched_ret = sched_setattr_tid_rt(tid, 50);
         int call_errno = errno;
+        pr_info("main consumer call#%d stage=RT-DONE ret=%ld errno=%d "
+                "(EPERM=1 means no PI walk on this call)\n",
+                call_num, sched_ret, call_errno);
+        fflush(stdout);
+
+        /* Step 2: NICE-ENTER — only if RT returned EPERM (as expected).
+         * This is the call that actually walks the PI chain. */
+        if (sched_ret != 0 && call_errno == EPERM) {
+          pr_info("main consumer call#%d stage=NICE-ENTER "
+                  "sched_setattr nice=%d (this DOES trigger "
+                  "rt_mutex_setprio -> adjust_prio_chain)\n",
+                  call_num, PSELECT_CONSUMER_NICE);
+          fflush(stdout);
+          errno = 0;
+          sched_ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
+          call_errno = errno;
+          pr_info("main consumer call#%d stage=NICE-DONE ret=%ld errno=%d\n",
+                  call_num, sched_ret, call_errno);
+          fflush(stdout);
+        }
+
         if (sched_ret == 0) {
           atomic_fetch_add(&consumer_success, 1);
         } else {
-          pr_info("main consumer sched tid=%d ret=%ld errno=%d\n",
-                  tid, sched_ret, call_errno);
+          pr_info("main consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
+                  tid, sched_ret, call_errno,
+                  atomic_load(&consumer_success));
         }
         calls_this_seq++;
         if (calls_this_seq >= CONSUMER_MAX_CALLS) {

