@@ -19,7 +19,7 @@
 #define DIRECT_MAP_END 0xffffff9000000000ULL
 #define VMEMMAP_START 0xfffffffe00000000ULL
 
-/* 与 targets/duchamp/util.c 的 p0_data_alias 严格一致的编译期版本:
+/* 与 targets/shennong/util.c 的 p0_data_alias 严格一致的编译期版本:
  *   linear 别名 = P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + (image - KIMAGE_TEXT_BASE)
  * common.h 默认 OR 版本锚定 P0_PHYS_OFFSET,只适用于 PHYS_LOAD == PHYS_OFFSET
  * 的机型;shennong 内核加载于 0xa8000000,OR 版会差 2GB(step=4 根因之一) */

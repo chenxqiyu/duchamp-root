@@ -5,19 +5,19 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Colorful-glassblock/duchamp-root">
-    <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=28&pause=800&color=00FF88&center=true&vCenter=true&width=700&lines=duchamp-root+%F0%9F%94%93;Xiaomi+K70e+%28duchamp%29+One-Click+Root;CVE-2026-43499+%28IonStack%29+Exploit;710%E8%A7%A3%E9%94%81%E8%8A%82%E6%9C%80%E6%96%B0%E5%8A%9B%E4%BD%9C+%F0%9F%94%A5"/>
+  <a href="https://github.com/Colorful-glassblock/shennong-root">
+    <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=28&pause=800&color=00FF88&center=true&vCenter=true&width=700&lines=shennong-root+%F0%9F%94%93;Xiaomi+K70e+%28shennong%29+One-Click+Root;CVE-2026-43499+%28IonStack%29+Exploit;710%E8%A7%A3%E9%94%81%E8%8A%82%E6%9C%80%E6%96%B0%E5%8A%9B%E4%BD%9C+%F0%9F%94%A5"/>
   </a>
 </p>
 
 <p align="center">
-  <img width="20%" src="https://count.getloli.com/@duchamp-root?name=duchamp-root&theme=random&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="visitor counter" />
+  <img width="20%" src="https://count.getloli.com/@shennong-root?name=shennong-root&theme=random&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="visitor counter" />
 </p>
 
 ---
 
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/Colorful-glassblock/duchamp-root?label=release&color=00FF88)
-![GitHub last commit](https://img.shields.io/github/last-commit/Colorful-glassblock/duchamp-root?label=last%20commit)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/Colorful-glassblock/shennong-root?label=release&color=00FF88)
+![GitHub last commit](https://img.shields.io/github/last-commit/Colorful-glassblock/shennong-root?label=last%20commit)
 ![Platform](https://img.shields.io/badge/platform-MTK6897%2FMT6897%20%28Dimensity%208300%29-blue)
 ![Android](https://img.shields.io/badge/Android-16%20%28API%2036%29-green)
 ![Kernel](https://img.shields.io/badge/Kernel-6.1.138--android14--11-orange)
@@ -48,7 +48,7 @@
 
 ### 🤔 这是什么
 
-**Xiaomi K70e (duchamp)** 一键 Root 工具，基于 **CVE-2026-43499 (IonStack)** 内核漏洞提权，集成 **KernelSU** 守护进程。
+**Xiaomi K70e (shennong)** 一键 Root 工具，基于 **CVE-2026-43499 (IonStack)** 内核漏洞提权，集成 **KernelSU** 守护进程。
 
 **通俗版**：你点一下，手机就 root 了。就这么简单。
 
@@ -62,7 +62,7 @@
 
 | 设备 | 代号 | 芯片 | 内核版本 | 状态 |
 |------|------|------|----------|:----:|
-| Redmi K70E | **duchamp** | MT6897 (Dimensity 8300) | 6.1.138-android14-11 | ✅ |
+| Redmi K70E | **shennong** | MT6897 (Dimensity 8300) | 6.1.138-android14-11 | ✅ |
 
 > 其它机型见 `src/targets/` 目录（原项目包含的参考配置，未实际验证）。
 
@@ -138,7 +138,7 @@ ksud: "我是嵌入在 preload.so 里的。"
 ### 📦 使用方式
 
 #### 前置条件
-- Xiaomi K70e (duchamp) 或其它支持的设备
+- Xiaomi K70e (shennong) 或其它支持的设备
 - 已解锁 Bootloader（或不解锁的临时 root 也支持）
 - ADB 调试已开启
 - 一个不怕变砖的勇气
@@ -147,7 +147,7 @@ ksud: "我是嵌入在 preload.so 里的。"
 
 ```bash
 # 从 Release 下载 preload.so
-wget https://github.com/Colorful-glassblock/duchamp-root/releases/download/v1.0/preload.so
+wget https://github.com/Colorful-glassblock/shennong-root/releases/download/v1.0/preload.so
 
 # 推送到设备
 adb push preload.so /data/local/tmp/
@@ -163,9 +163,9 @@ su -c "LD_PRELOAD=/data/local/tmp/preload.so your_app"
 
 ```bash
 # 需要 NDK 或 Termux 的 aarch64-linux-android-clang
-make PROJECT=duchamp
+make PROJECT=shennong
 
-# 输出在 build/duchamp/bin/preload.so
+# 输出在 build/shennong/bin/preload.so
 ```
 
 ---
@@ -191,8 +191,8 @@ make PROJECT=duchamp
     ├── common.h                  # 全局常量 + 函数声明
     ├── kernelsnitch/             # Kernelsnitch 绕过
     └── targets/
-        ├── duchamp/
-        │   └── target.h          # duchamp 专属偏移
+        ├── shennong/
+        │   └── target.h          # shennong 专属偏移
         ├── blazer-CP2A.260605.012/
         ├── caiman-CP2A.260605.012.C1/
         ├── comet-CP2A.260605.012.C1/
@@ -270,7 +270,7 @@ A: はいはいわかりました草
 
 ### 🤔 What is This
 
-**Xiaomi K70e (duchamp)** one-click root tool based on **CVE-2026-43499 (IonStack)** kernel exploit, integrated with **KernelSU** daemon.
+**Xiaomi K70e (shennong)** one-click root tool based on **CVE-2026-43499 (IonStack)** kernel exploit, integrated with **KernelSU** daemon.
 
 **Casual version**: Click, root, done.
 
@@ -284,7 +284,7 @@ A: はいはいわかりました草
 
 | Device | Codename | SoC | Kernel | Status |
 |--------|----------|-----|--------|:------:|
-| Redmi K70E | **duchamp** | MT6897 (Dimensity 8300) | 6.1.138-android14-11 | ✅ |
+| Redmi K70E | **shennong** | MT6897 (Dimensity 8300) | 6.1.138-android14-11 | ✅ |
 
 > Other devices under `src/targets/` are reference configs from the original project, not verified.
 
@@ -360,7 +360,7 @@ Dev:  "710 is a Xiaomi 14 codename, not iPhone 14. Get out."
 ### 📦 Usage
 
 #### Prerequisites
-- Xiaomi K70e (duchamp) or other supported device
+- Xiaomi K70e (shennong) or other supported device
 - Unlocked bootloader (or not — LD_PRELOAD works either way)
 - ADB debugging enabled
 - A brave soul
@@ -369,7 +369,7 @@ Dev:  "710 is a Xiaomi 14 codename, not iPhone 14. Get out."
 
 ```bash
 # Download preload.so from Releases
-wget https://github.com/Colorful-glassblock/duchamp-root/releases/download/v1.0/preload.so
+wget https://github.com/Colorful-glassblock/shennong-root/releases/download/v1.0/preload.so
 
 # Push to device
 adb push preload.so /data/local/tmp/
@@ -383,9 +383,9 @@ LD_PRELOAD=/data/local/tmp/preload.so your_app
 
 ```bash
 # Requires NDK or Termux aarch64-linux-android-clang
-make PROJECT=duchamp
+make PROJECT=shennong
 
-# Output at build/duchamp/bin/preload.so
+# Output at build/shennong/bin/preload.so
 ```
 
 ---

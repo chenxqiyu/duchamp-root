@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include "targets/duchamp/target.h"
+#include "targets/shennong/target.h"
 
 #define IMAGE(x) (KIMAGE_TEXT_BASE + (x))
 #define RUNTIME_DATA_ALIAS(off) (P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + (off))

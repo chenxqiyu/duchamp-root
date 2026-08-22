@@ -12,7 +12,7 @@ $javac   = "F:\core\java\tool\jdk-17.0.2\bin\javac.exe"
 $keytool = "F:\core\java\tool\jdk-17.0.2\bin\keytool.exe"
 $python  = "python"
 
-$so      = "..\build\duchamp\bin\preload.so"
+$so      = "..\build\shennong\bin\preload.so"
 $ks      = "debug.keystore"
 $out     = "dchamp-poc.apk"
 
