@@ -253,12 +253,11 @@ int has_zero_byte(uintptr_t value) {
 
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
-  uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
+  return P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + off;
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
+  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD;
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
