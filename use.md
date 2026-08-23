@@ -157,3 +157,4 @@ git checkout ed1af3a -- .
 
 
 https://github.com/MakeDecisionWorth/Root-My-Galaxy-Payloads/tree/main
+https://github.com/MakeDecisionWorth/Root-My-Galaxy-Payloads/blob/main/src/targets/xperia1vi-jp-69.2.A.4.24/target.h
