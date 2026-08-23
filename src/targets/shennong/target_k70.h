@@ -1,32 +1,20 @@
 #ifndef TARGET_H
 #define TARGET_H
 
-#define BUILD_VARIANT_LABEL "shennong_OS3.0.307.0.WNBCNXM_16.0"
-#define BUILD_FINGERPRINT "Xiaomi/shennong/shennong:16/OS3.0.307.0.WNBCNXM/user/release-keys"
+#define BUILD_VARIANT_LABEL "duchamp_OS3.0.303.0.WNLCNXM_16.0"
+#define BUILD_FINGERPRINT "Xiaomi/duchamp/duchamp:16/OS3.0.303.0.WNLCNXM/15430684:user/release-keys"
 
-/* shennong = 39-bit VA(kernel.bin _text 精确命中 KIMAGE_VADDR(39),
- * init_task 自引用 0xffffffc009fef600 佐证;VMEMMAP_START 亦为 39-bit 值):
- *   linear region = [0xffffff8000000000, 0xffffffc000000000)
- *   linear VA = PAGE_OFFSET + 绝对物理地址
- *   (run2 实测 init_task 别名 0xffffff80a9fef600 = PAGE_OFFSET + 0xa9fef600)
- * DRAM:phys [0x80000000, 0x480000000)(16GB);内核镜像加载于 phys 0xa8000000。 */
 #define KIMAGE_TEXT_BASE 0xffffffc008000000ULL
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL
 #define P0_PHYS_OFFSET 0x80000000ULL
-#define P0_KERNEL_PHYS_LOAD 0xa8000000ULL
+#define P0_KERNEL_PHYS_LOAD 0x80000000ULL
+#define KERNELSNITCH_IDENTITY_START 0xffffff8000000000ULL
 #define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL
-#define DIRECT_MAP_BASE 0xffffff8080000000ULL
+#define DIRECT_MAP_BASE 0xffffff8000000000ULL
 #define DIRECT_MAP_END 0xffffff9000000000ULL
 #define VMEMMAP_START 0xfffffffe00000000ULL
 
-/* 与 targets/shennong/util.c 的 p0_data_alias 严格一致的编译期版本:
- *   linear 别名 = P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + (image - KIMAGE_TEXT_BASE)
- * common.h 默认 OR 版本锚定 P0_PHYS_OFFSET,只适用于 PHYS_LOAD == PHYS_OFFSET
- * 的机型;shennong 内核加载于 0xa8000000,OR 版会差 2GB(step=4 根因之一) */
-#define P0_DATA_ALIAS_CONST(image_addr) \
-  (P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + ((image_addr) - KIMAGE_TEXT_BASE))
-
-#define PSELECT_WAITER_WORD_SHIFT 3
+#define PSELECT_WAITER_WORD_SHIFT 1
 
 #define ASHMEM_MISC_FOPS_OFF 0x0214bec0ULL
 #define ASHMEM_FOPS_OFF 0x0126d7b8ULL
