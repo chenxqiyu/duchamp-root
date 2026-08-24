@@ -153,3 +153,53 @@ rcu caller = 0xffffffd06fd67b44，锚点 0xffffffc008167b44
 
 git stash
 git checkout ed1af3a -- .
+
+## 8. KASLR 泄漏主路线改为 tracefs sched_blocked_reason（2026-08-24）
+
+### 背景
+- shennong 实机 KASLR VA slide 巨大（0x1067C00000 ≈ 65.7GB，2MB 对齐），
+  pselect/boot_id 路线在非零 slide 下 W1 写目标错位；且 6.1 上 waiter 走
+  Q_REQUEUE_PI_IGNORE 分支不挂树，boot_id 写入从未触发（use.md §6）。
+- tracefs 路线真机已验证：worker_thread caller=0xffffffd06fcda4ac /
+  锚点 0xffffffc0080da4ac；rcu caller=0xffffffd06fd67b44 / 锚点
+  0xffffffc008167b44，两者推出同一 slide=0x1067C00000，交叉验证通过。
+
+### 实现（src/slide.c，duchamp 构建即用此共享文件）
+- `slide_tracefs_leak_kernel_base()` 为主路线：
+  1. 找 tracefs 挂载点（/sys/kernel/tracing → /d/tracing → /sys/kernel/debug/tracing）
+  2. tracing_on=0 → events/sched/sched_blocked_reason/enable=1 → tracing_on=1
+  3. 运行时读 `events/sched/sched_blocked_reason/id`（不硬编码事件号）
+  4. O_TRUNC trace 清缓冲 → sleep 1.5s（让空闲 kworker 在 worker_thread->schedule 阻塞）
+  5. 逐 CPU 读 `per_cpu/cpuN/trace_pipe_raw`，解析 ring buffer 页
+     （页头 time_stamp@0+commit@8，数据自 offset 16；记录=4B头+payload，
+      payload 前 8B 为 trace_entry）
+  6. 扫 payload+16..48 的 8B 对齐值，与 worker_thread(0xda4ac)/rcu(0x167b44)
+     锚点比对：slide=caller-(KIMAGE_TEXT_BASE+锚点)，要求 64KB 对齐且 ≤128GB
+  7. 候选取多数（≥2 样本强校验，单样本告警接受）；失败回退文本 trace 解析
+- `slide_leak_kernel_base()`：tracefs 成功即返回；失败才回退 pselect/boot_id
+- 环境变量：`SLIDE_FORCE_BOOTID=1` 强制 tracefs 后仍跑 boot_id 验证；
+  `SLIDE_P0_OFFSET=<hex>` 强制 p0 别名平移（排查物理 KASLR 用）
+
+### slide_p0_offset 语义（关键）
+- `data_addr() = p0 别名 + slide_p0_offset`（util.c p0_data_alias 已加）
+- **shennong = 0**：物理加载固定 0xa8000000（init_task 线性别名
+  0xffffff80a9fef600 实测无偏），P0 别名在 PAGE_OFFSET 线性映射区，
+  不随 VA slide 平移；words[]/SLIDE payload 全部改走 data_addr(XXX_IMAGE)
+- 三星 m1q 的 P0 别名在 image 映射区（0xffffffc0...），随 slide 平移，
+  该类机型才需要 SLIDE_P0_OFFSET=slide（target.h SLIDE_P0_OFFSET 可改）
+
+### 编译（duchamp 用共享 src/slide.c，勿再用已删除的 targets/duchamp/slide.c）
+```powershell
+cd "I:\云盘缓存\down\shennong-ota_full-OS3.0.307.0.WNBCNXM-user-16.0-5bcfc9ad5d\output\duchamp-root"
+$clang = "C:\Users\Administrator\AppData\Local\Android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
+& $clang --target=aarch64-linux-android35 -fPIC -O2 -g0 -Wall -Wextra -Isrc -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function '-DTARGET_CONFIG_H="targets/duchamp/target.h"' src/main.c src/util.c src/slide.c src/fops.c src/pipe.c src/root.c src/preload.c src/ksud_blob.S -shared -o build/duchamp/bin/preload.so -pthread
+```
+
+### 上机验证
+```
+adb push build/duchamp/bin/preload.so /data/local/tmp/preload.so
+adb shell 'LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true'
+```
+看日志：`slide tracefs root=... event_id=N` → `slide tracefs caller=... slide=...`
+→ `slide-kaslr-ok source=tracefs base=... slide=...`。若 tracefs 不可写
+（EACCES）会自动回退 boot_id pselect 路线。
