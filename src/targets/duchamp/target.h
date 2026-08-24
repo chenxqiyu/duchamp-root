@@ -137,7 +137,7 @@
 #define FAKE_TASK_PI_TOP_TASK_OFF 0x948
 #define FAKE_TASK_PI_BLOCKED_ON_OFF 0x950
 
-#define CFG_PAGE_OFF 16
+#define CFG_PAGE_OFF 16 /* √ 完全确认:p0 profile 日志逐位验证 */
 #define CFG_NEEDS_READ_FILL_OFF 80
 #define CFG_BIN_BUFFER_OFF 88
 #define CFG_BIN_BUFFER_SIZE_OFF 96
