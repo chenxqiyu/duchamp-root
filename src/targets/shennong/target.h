@@ -4,12 +4,6 @@
 #define BUILD_VARIANT_LABEL "shennong_OS3.0.307.0.WNBCNXM_16.0"
 #define BUILD_FINGERPRINT "Xiaomi/shennong/shennong:16/OS3.0.307.0.WNBCNXM/user/release-keys"
 
-/* shennong = 39-bit VA(kernel.bin _text 精确命中 KIMAGE_VADDR(39),
- * init_task 自引用 0xffffffc009fef600 佐证;VMEMMAP_START 亦为 39-bit 值):
- *   linear region = [0xffffff8000000000, 0xffffffc000000000)
- *   linear VA = PAGE_OFFSET + 绝对物理地址
- *   (run2 实测 init_task 别名 0xffffff80a9fef600 = PAGE_OFFSET + 0xa9fef600)
- * DRAM:phys [0x80000000, 0x480000000)(16GB);内核镜像加载于 phys 0xa8000000。 */
 #define KIMAGE_TEXT_BASE 0xffffffc008000000ULL /* √ 完全确认:宏链MODULES_END + vmlinux.lds.S:401 ASSERT */
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL /* √ 完全确认:宏链 -(1UL<<39) */
 #define P0_PHYS_OFFSET 0x80000000ULL /* √ 完全确认:DTB /memory reg */
