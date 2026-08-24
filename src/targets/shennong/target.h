@@ -6,7 +6,7 @@
 
 #define KIMAGE_TEXT_BASE 0xffffffc008000000ULL /* √ 完全确认:宏链MODULES_END + vmlinux.lds.S:401 ASSERT */
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL /* √ 完全确认:宏链 -(1UL<<39) */
-#define P0_PHYS_OFFSET 0x80000000ULL /* √ 完全确认:DTB /memory reg */
+#define P0_PHYS_OFFSET 0x80000000ULL /* √ 完全确认:DTB /memory reg */ 
 #define P0_KERNEL_PHYS_LOAD 0xa8000000ULL /* √ 完全确认:DTB kernel_addr_r */
 #define KERNELSNITCH_IDENTITY_START 0xffffff8000000000ULL /* √ 完全确认:=PAGE_OFFSET,与全部机型及kernelsnitch.h一致 */
 #define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL /* √ 完全确认:=PAGE_OFFSET+64GB 窗口上界 */
