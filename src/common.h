@@ -300,6 +300,9 @@ extern uint64_t kaslr_release_ptr;
 extern uint64_t kaslr_show_fdinfo_ptr;
 extern uint64_t kaslr_base;
 extern uint64_t kaslr_slide;
+/* 线性别名平移量 = 物理加载随机化偏移(m1q 类机型 = slide;shennong = 0)。
+ * data_addr() = p0 别名 + slide_p0_offset;SLIDE_P0_OFFSET 环境变量可覆盖。 */
+extern uint64_t slide_p0_offset;
 extern uint64_t kaslr_expected_ioctl;
 extern uint64_t kaslr_expected_mmap;
 extern uint64_t kaslr_expected_release;
@@ -406,6 +409,7 @@ int hex_value(char c);
 uint64_t slide_read_stext(void);
 uint64_t slide_child_leak_stext(void);
 int slide_leak_kernel_base(void);
+int slide_tracefs_leak_kernel_base(void);
 uint64_t perf_leak_text_base(void);
 
 ssize_t configfs_write_once(
