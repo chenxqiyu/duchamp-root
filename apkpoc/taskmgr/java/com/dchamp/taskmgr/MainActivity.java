@@ -16,26 +16,19 @@ import java.io.InputStreamReader;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 电视端“任务管理器”小工具。
- * 打开应用即按顺序执行(root):
- *   1) input keyevent KEYCODE_APP_SWITCH   // 调出任务切换器
- *   2) input keyevent 20                   // DPAD_DOWN
- *   3) input tap 1600 80                   // 点击坐标
- * 各步之间留 ~800ms 间隔。
+ * 电视端"任务管理器"小工具。
+ * 打开应用即以 root 执行"一键清理后台应用"(保留 tvlauncher / systemui):
+ *   dumpsys activity activities | grep "Hist #" | sed ... | sort -u | grep -vE '...' | while read p; do am force-stop "$p"; done
+ * 整条管道/循环作为单个参数传给 su -c，由远端 shell 展开 $p。
  */
 public class MainActivity extends Activity {
     static final String TAG = "DchampTaskMgr";
 
-    // 依次执行的命令（均通过 su 以 root 执行）
-    static final String[] CMDS = {
-            "input keyevent KEYCODE_APP_SWITCH",
-            "input keyevent 20",
-            "input tap 1600 80"
-    };
-    // 每步之间的间隔(毫秒)
-    static final long STEP_INTERVAL_MS = 800;
+    // 整条命令(含管道/循环)必须作为单个参数传给 su -c，由远端 shell 展开 $p
+    static final String CMD =
+            "dumpsys activity activities | grep \"Hist #\" | sed -n 's/.*u0 \\([^/]*\\)\\/.*/\\1/p' | sort -u | grep -vE 'tvlauncher|systemui' | while read p; do am force-stop \"$p\"; done";
 
-    // 可用的 su 实现（避开 /system/xbin/su 坏桩）
+    // 可用的 su 实现(避开 /system/xbin/su 坏桩)
     static final String[] SU_CANDIDATES = {
             "/sbin/su",
             "/data/adb/magisk/su",
@@ -61,16 +54,15 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("\n点开应用即执行(root, 逐步):\n"
-                + "  1) input keyevent KEYCODE_APP_SWITCH\n"
-                + "  2) input keyevent 20\n"
-                + "  3) input tap 1600 80\n\n按 OK / 方向键确认 可再次触发。\n");
+        hint.setText("\n点开应用即以 root 清理后台应用:\n"
+                + "  dumpsys activity activities | grep Hist # | ... | am force-stop $p\n"
+                + "  保留 tvlauncher / systemui。\n\n按 OK / 方向键确认 可再次触发。\n");
         hint.setTextSize(16);
         hint.setTextColor(0xFFBDBDBD);
         root.addView(hint);
 
         Button btn = new Button(this);
-        btn.setText("执行任务管理器序列");
+        btn.setText("清理后台应用");
         btn.setTextSize(20);
         btn.setOnClickListener(v -> fire());
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
@@ -98,24 +90,12 @@ public class MainActivity extends Activity {
         Log.i(TAG, s.replace("\n", " | "));
     }
 
-    /** 在后台线程逐步执行命令序列，步骤间留间隔。 */
+    /** 在后台线程以 root 执行整条清理命令。 */
     private void fire() {
         new Thread(() -> {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < CMDS.length; i++) {
-                String r = runAsRoot(CMDS[i]);
-                sb.append("[step ").append(i + 1).append("] ").append(r).append("\n");
-                setStatus("进度:\n" + sb);
-                Log.i(TAG, "step " + (i + 1) + " -> " + r);
-                if (i < CMDS.length - 1) {
-                    try {
-                        Thread.sleep(STEP_INTERVAL_MS);
-                    } catch (InterruptedException ignored) {
-                    }
-                }
-            }
-            setStatus("完成:\n" + sb);
-            Log.i(TAG, "SEQUENCE DONE");
+            String r = runAsRoot(CMD);
+            setStatus("执行结果:\n" + r);
+            Log.i(TAG, "CLEAN DONE -> " + r);
         }).start();
     }
 
@@ -126,7 +106,7 @@ public class MainActivity extends Activity {
                 Process p = new ProcessBuilder(su, "-c", cmd)
                         .redirectErrorStream(true)
                         .start();
-                String out = readFully(p, 8000);
+                String out = readFully(p, 15000);
                 try {
                     if (p.exitValue() == 0) {
                         return "root OK via [" + su + "] | " + out;
@@ -138,12 +118,12 @@ public class MainActivity extends Activity {
                 // su 不存在/启动失败，尝试下一个
             }
         }
-        // 回退：直接执行（无 root）
+        // 回退：直接执行（无 root，通常会失败）
         try {
             Process p = new ProcessBuilder("sh", "-c", cmd)
                     .redirectErrorStream(true)
                     .start();
-            String out = readFully(p, 8000);
+            String out = readFully(p, 15000);
             int rc;
             try {
                 rc = p.exitValue();
