@@ -26,7 +26,7 @@ public class MainActivity extends Activity {
 
     // 整条命令(含管道/循环)必须作为单个参数传给 su -c，由远端 shell 展开 $p
     static final String CMD =
-            "dumpsys activity activities | grep \"Hist #\" | sed -n 's/.*u0 \\([^/]*\\)\\/.*/\\1/p' | sort -u | grep -vE 'tvlauncher|systemui' | while read p; do am force-stop \"$p\"; done";
+            "dumpsys activity activities | grep \"Hist #\" | sed -n 's/.*u0 \\([^/]*\\)\\/.*/\\1/p' | sort -u | grep -vE 'tvlauncher|systemui' | while read p; do am force-stop \"$p\"; done ; am kill-all";
 
     // 可用的 su 实现(避开 /system/xbin/su 坏桩)
     static final String[] SU_CANDIDATES = {
@@ -55,7 +55,8 @@ public class MainActivity extends Activity {
 
         TextView hint = new TextView(this);
         hint.setText("\n点开应用即以 root 清理后台应用:\n"
-                + "  dumpsys activity activities | grep Hist # | ... | am force-stop $p\n"
+                + "  1) dumpsys activity activities | grep Hist # | ... | am force-stop $p\n"
+                + "  2) am kill-all\n"
                 + "  保留 tvlauncher / systemui。\n\n按 OK / 方向键确认 可再次触发。\n");
         hint.setTextSize(16);
         hint.setTextColor(0xFFBDBDBD);
