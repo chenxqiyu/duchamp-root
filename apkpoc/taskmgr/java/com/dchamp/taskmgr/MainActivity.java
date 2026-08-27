@@ -13,16 +13,34 @@ import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 电视端“任务管理器”小工具。
- * 打开应用即执行 root 命令: input keyevent KEYCODE_APP_SWITCH
- * 该命令会调出系统的“最近任务 / 任务切换器”界面（电视上的任务管理器）。
+ * 打开应用即按顺序执行(root):
+ *   1) input keyevent KEYCODE_APP_SWITCH   // 调出任务切换器
+ *   2) input keyevent 20                   // DPAD_DOWN
+ *   3) input tap 1600 80                   // 点击坐标
+ * 各步之间留 ~800ms 间隔。
  */
 public class MainActivity extends Activity {
     static final String TAG = "DchampTaskMgr";
-    // 要执行的命令（root 下）
-    static final String CMD = "input keyevent KEYCODE_APP_SWITCH";
+
+    // 依次执行的命令（均通过 su 以 root 执行）
+    static final String[] CMDS = {
+            "input keyevent KEYCODE_APP_SWITCH",
+            "input keyevent 20",
+            "input tap 1600 80"
+    };
+    // 每步之间的间隔(毫秒)
+    static final long STEP_INTERVAL_MS = 800;
+
+    // 可用的 su 实现（避开 /system/xbin/su 坏桩）
+    static final String[] SU_CANDIDATES = {
+            "/sbin/su",
+            "/data/adb/magisk/su",
+            "su"
+    };
 
     private TextView status;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -43,13 +61,16 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("\n点开应用即执行(root):\n  input keyevent KEYCODE_APP_SWITCH\n\n按 OK / 方向键确认 可再次触发。\n");
+        hint.setText("\n点开应用即执行(root, 逐步):\n"
+                + "  1) input keyevent KEYCODE_APP_SWITCH\n"
+                + "  2) input keyevent 20\n"
+                + "  3) input tap 1600 80\n\n按 OK / 方向键确认 可再次触发。\n");
         hint.setTextSize(16);
         hint.setTextColor(0xFFBDBDBD);
         root.addView(hint);
 
         Button btn = new Button(this);
-        btn.setText("打开任务切换器 (APP_SWITCH)");
+        btn.setText("执行任务管理器序列");
         btn.setTextSize(20);
         btn.setOnClickListener(v -> fire());
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
@@ -67,79 +88,97 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        setStatus("已启动，正在执行命令…");
+        setStatus("已启动，准备执行命令…");
         // 点开应用就执行
         fire();
     }
 
     private void setStatus(final String s) {
         handler.post(() -> status.setText(s));
-        Log.i(TAG, s);
+        Log.i(TAG, s.replace("\n", " | "));
     }
 
-    /** 在后台线程执行命令，避免阻塞 UI。 */
+    /** 在后台线程逐步执行命令序列，步骤间留间隔。 */
     private void fire() {
         new Thread(() -> {
-            final String result = runAsRoot(CMD);
-            setStatus("执行结果: " + result);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < CMDS.length; i++) {
+                String r = runAsRoot(CMDS[i]);
+                sb.append("[step ").append(i + 1).append("] ").append(r).append("\n");
+                setStatus("进度:\n" + sb);
+                Log.i(TAG, "step " + (i + 1) + " -> " + r);
+                if (i < CMDS.length - 1) {
+                    try {
+                        Thread.sleep(STEP_INTERVAL_MS);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            }
+            setStatus("完成:\n" + sb);
+            Log.i(TAG, "SEQUENCE DONE");
         }).start();
     }
 
-    /**
-     * 以 root 执行命令。依次尝试可用的 su 实现，
-     * 注意避开 /system/xbin/su（该设备上是坏桩，会报 invalid uid/gid '-c'）。
-     * 若所有 su 都不可用，则回退到直接执行（shell 具备 input 组权限时仍可工作）。
-     */
+    /** 以 root 执行单条命令；依次尝试可用 su，全部失败则回退直接执行。 */
     private String runAsRoot(String cmd) {
-        String[] suCandidates = {
-                "/sbin/su",
-                "/data/adb/magisk/su",
-                "su"
-        };
-        for (String su : suCandidates) {
+        for (String su : SU_CANDIDATES) {
             try {
-                ProcessBuilder pb = new ProcessBuilder(su, "-c", cmd);
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                String out = readWithTimeout(p, 5000);
-                int rc = p.waitFor();
-                if (rc == 0) {
-                    return "root OK via [" + su + "] rc=0 | " + out;
+                Process p = new ProcessBuilder(su, "-c", cmd)
+                        .redirectErrorStream(true)
+                        .start();
+                String out = readFully(p, 8000);
+                try {
+                    if (p.exitValue() == 0) {
+                        return "root OK via [" + su + "] | " + out;
+                    }
+                } catch (IllegalThreadStateException e) {
+                    p.destroy();
                 }
-                // su 存在但本次被拒绝(rc!=0)，继续尝试下一个候选
             } catch (Exception ignored) {
-                // su 不存在或启动失败，尝试下一个
+                // su 不存在/启动失败，尝试下一个
             }
         }
-        // 回退：直接执行（无需 root）
+        // 回退：直接执行（无 root）
         try {
-            ProcessBuilder pb = new ProcessBuilder("sh", "-c", cmd);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String out = readWithTimeout(p, 5000);
-            int rc = p.waitFor();
+            Process p = new ProcessBuilder("sh", "-c", cmd)
+                    .redirectErrorStream(true)
+                    .start();
+            String out = readFully(p, 8000);
+            int rc;
+            try {
+                rc = p.exitValue();
+            } catch (IllegalThreadStateException e) {
+                p.destroy();
+                rc = -1;
+            }
             return "no-su, direct rc=" + rc + " | " + out;
         } catch (Exception e) {
             return "ERROR: " + e;
         }
     }
 
-    /** 带超时的读取，避免 su 卡住时 UI 线程无限等待。 */
-    private String readWithTimeout(Process p, int timeoutMs) {
+    /** 读满进程输出，最多等 timeoutMs；进程退出即返回。 */
+    private String readFully(Process p, long timeoutMs) {
         StringBuilder sb = new StringBuilder();
-        try {
-            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            long start = System.currentTimeMillis();
-            while (System.currentTimeMillis() - start < timeoutMs) {
-                if (r.ready()) {
-                    String line = r.readLine();
-                    if (line == null) break;
+        Thread t = new Thread(() -> {
+            try {
+                BufferedReader r = new BufferedReader(
+                        new InputStreamReader(p.getInputStream()));
+                String line;
+                while ((line = r.readLine()) != null) {
                     sb.append(line).append("\n");
-                } else {
-                    Thread.sleep(50);
                 }
+            } catch (Exception ignored) {
             }
+        });
+        t.start();
+        try {
+            p.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (Exception ignored) {
+        }
+        try {
+            t.join(500);
+        } catch (InterruptedException ignored) {
         }
         return sb.toString().trim();
     }
